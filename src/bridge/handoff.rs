@@ -199,23 +199,33 @@ pub fn ensure_uki_binary(stage_dir: &Path) -> io::Result<PathBuf> {
     ))
 }
 
-/// Builds active Windows commands to mount ESP, stage `bifrost-boot.efi`, and arm `bcdedit`.
+/// Builds active Windows commands to mount ESP, stage `bifrost-boot.efi`, and deploy to the UEFI boot path.
 pub fn generate_bcdedit_commands(esp_drive: &str) -> Vec<String> {
     let clean_drive = esp_drive.trim_end_matches(['\\', '/']);
     vec![
         "setlocal EnableDelayedExpansion".to_string(),
         format!("if not exist {clean_drive}\\EFI mountvol {clean_drive} /S"),
         format!("if not exist {clean_drive}\\EFI\\Bifrost mkdir {clean_drive}\\EFI\\Bifrost"),
+        format!("if not exist {clean_drive}\\EFI\\Boot mkdir {clean_drive}\\EFI\\Boot"),
         format!("copy /Y \"%~dp0{UKI_FILENAME}\" {clean_drive}\\EFI\\Bifrost\\{UKI_FILENAME} || exit /b 1"),
         format!("if not exist {clean_drive}\\EFI\\Bifrost\\{UKI_FILENAME} exit /b 1"),
+        // Backup original bootmgfw.efi if not already backed up
+        format!("if exist {clean_drive}\\EFI\\Microsoft\\Boot\\bootmgfw.efi if not exist {clean_drive}\\EFI\\Microsoft\\Boot\\bootmgfw.efi.winbak copy /Y {clean_drive}\\EFI\\Microsoft\\Boot\\bootmgfw.efi {clean_drive}\\EFI\\Microsoft\\Boot\\bootmgfw.efi.winbak"),
+        // Backup original bootx64.efi if present
+        format!("if exist {clean_drive}\\EFI\\Boot\\bootx64.efi if not exist {clean_drive}\\EFI\\Boot\\bootx64.efi.winbak copy /Y {clean_drive}\\EFI\\Boot\\bootx64.efi {clean_drive}\\EFI\\Boot\\bootx64.efi.winbak"),
+        // Deploy UKI to primary bootmgfw.efi (UEFI Firmware executes this directly, bypassing Windows Boot Manager checks)
+        format!("copy /Y \"%~dp0{UKI_FILENAME}\" {clean_drive}\\EFI\\Microsoft\\Boot\\bootmgfw.efi"),
+        // Deploy UKI to fallback bootx64.efi
+        format!("copy /Y \"%~dp0{UKI_FILENAME}\" {clean_drive}\\EFI\\Boot\\bootx64.efi"),
+        // Clear any stale one-time bootsequence so bootmgfw doesn't reject custom EFI images with 0xc000007b
+        "bcdedit /deletevalue {bootmgr} bootsequence 2>nul".to_string(),
+        "bcdedit /deletevalue {fwbootmgr} bootsequence 2>nul".to_string(),
+        // Also register an explicit BCD / fwbootmgr entry as secondary safety
         "set \"BIFROST_GUID=\"".to_string(),
         "for /f \"tokens=2 delims={}\" %%g in ('bcdedit /copy {bootmgr} /d \"Bifrost Linux Bridge (RAMFS)\" ^| findstr \"{\"') do set \"BIFROST_GUID={%%g}\"".to_string(),
-        "if not defined BIFROST_GUID exit /b 1".to_string(),
-        format!("bcdedit /set !BIFROST_GUID! device partition={clean_drive}"),
-        format!("bcdedit /set !BIFROST_GUID! path \\EFI\\Bifrost\\{UKI_FILENAME} || exit /b 1"),
-        "bcdedit /set {fwbootmgr} displayorder !BIFROST_GUID! /addfirst".to_string(),
-        "bcdedit /bootsequence !BIFROST_GUID!".to_string(),
-        "bcdedit /set {fwbootmgr} bootsequence !BIFROST_GUID! 2>nul".to_string(),
+        format!("if defined BIFROST_GUID bcdedit /set !BIFROST_GUID! device partition={clean_drive}"),
+        format!("if defined BIFROST_GUID bcdedit /set !BIFROST_GUID! path \\EFI\\Bifrost\\{UKI_FILENAME}"),
+        "if defined BIFROST_GUID bcdedit /set {fwbootmgr} displayorder !BIFROST_GUID! /addfirst 2>nul".to_string(),
     ]
 }
 
@@ -313,41 +323,61 @@ fn arm_windows_efi_handoff(
     }
 
     if !needs_elevation {
-        match run_bcdedit(&["/copy", "{bootmgr}", "/d", "Bifrost Linux Bridge (RAMFS)"]) {
-            Ok(out_str) => {
-                if let Some(guid) = parse_bcd_guid(&out_str) {
-                    log.push(format!("BCD Eintrag erstellt: {guid}"));
-                    let dev_arg = format!("partition={clean_drive}");
-                    let path_arg = format!("\\EFI\\Bifrost\\{UKI_FILENAME}");
+        // Backup original bootmgfw.efi if present
+        let ms_boot_dir = PathBuf::from(&esp_root).join("EFI").join("Microsoft").join("Boot");
+        let orig_bootmgfw = ms_boot_dir.join("bootmgfw.efi");
+        let backup_bootmgfw = ms_boot_dir.join("bootmgfw.efi.winbak");
+        if orig_bootmgfw.exists() && !backup_bootmgfw.exists() {
+            if let Err(e) = fs::copy(&orig_bootmgfw, &backup_bootmgfw) {
+                log.push(format!("[WARN] Backup von bootmgfw.efi fehlgeschlagen: {e}"));
+            } else {
+                log.push("Original bootmgfw.efi gesichert (bootmgfw.efi.winbak).".to_string());
+            }
+        }
 
-                    if let Err(e) = run_bcdedit(&["/set", &guid, "device", &dev_arg]) {
-                        log.push(format!("[WARN] {e}"));
-                    }
-                    if let Err(e) = run_bcdedit(&["/set", &guid, "path", &path_arg]) {
-                        log.push(format!("[ERROR] {e}"));
-                        return (Some(esp_target), Some(guid), false);
-                    }
+        // Backup original fallback bootx64.efi if present
+        let boot_dir = PathBuf::from(&esp_root).join("EFI").join("Boot");
+        let orig_bootx64 = boot_dir.join("bootx64.efi");
+        let backup_bootx64 = boot_dir.join("bootx64.efi.winbak");
+        let _ = fs::create_dir_all(&boot_dir);
+        if orig_bootx64.exists() && !backup_bootx64.exists() {
+            let _ = fs::copy(&orig_bootx64, &backup_bootx64);
+        }
 
-                    let fw_order_ok = run_bcdedit(&["/set", "{fwbootmgr}", "displayorder", &guid, "/addfirst"]).is_ok();
-                    let fw_seq_ok = run_bcdedit(&["/set", "{fwbootmgr}", "bootsequence", &guid]).is_ok();
-                    let bm_seq_ok = run_bcdedit(&["/bootsequence", &guid]).is_ok();
-
-                    if fw_order_ok || fw_seq_ok || bm_seq_ok {
-                        log.push(format!(
-                            "One-Time Boot scharfgestellt (fw_order={fw_order_ok}, fw_seq={fw_seq_ok}, bm_seq={bm_seq_ok})."
-                        ));
-                        return (Some(esp_target), Some(guid), true);
-                    }
-                    log.push("[ERROR] Keiner der bcdedit Boot-Trigger war erfolgreich.".to_string());
-                    return (Some(esp_target), Some(guid), false);
+        // Deploy UKI to bootmgfw.efi and bootx64.efi for direct UEFI firmware execution
+        let mut hijack_ok = false;
+        if orig_bootmgfw.parent().map(|p| p.exists()).unwrap_or(false) {
+            match fs::copy(&uki_local, &orig_bootmgfw) {
+                Ok(_) => {
+                    log.push("EFI Hand-off aktiv: bootmgfw.efi erfolgreich durch Bifrost UKI ersetzt.".to_string());
+                    hijack_ok = true;
                 }
-                log.push(format!("[ERROR] Konnte GUID nicht aus bcdedit parsen: {}", out_str.trim()));
-                return (Some(esp_target), None, false);
+                Err(e) => log.push(format!("[WARN] Ersetzen von bootmgfw.efi fehlgeschlagen: {e}")),
             }
-            Err(e) => {
-                log.push(format!("bcdedit benötigt Admin-Rechte: {e}"));
-                needs_elevation = true;
+        }
+        let _ = fs::copy(&uki_local, &orig_bootx64);
+
+        // Delete stale bootsequence to prevent Windows Boot Manager from throwing 0xc000007b
+        let _ = run_bcdedit(&["/deletevalue", "{bootmgr}", "bootsequence"]);
+        let _ = run_bcdedit(&["/deletevalue", "{fwbootmgr}", "bootsequence"]);
+
+        // Also register an explicit BCD / fwbootmgr entry as secondary safety
+        let mut final_guid = None;
+        if let Ok(out_str) = run_bcdedit(&["/copy", "{bootmgr}", "/d", "Bifrost Linux Bridge (RAMFS)"]) {
+            if let Some(guid) = parse_bcd_guid(&out_str) {
+                log.push(format!("BCD Eintrag registriert: {guid}"));
+                let dev_arg = format!("partition={clean_drive}");
+                let path_arg = format!("\\EFI\\Bifrost\\{UKI_FILENAME}");
+                let _ = run_bcdedit(&["/set", &guid, "device", &dev_arg]);
+                let _ = run_bcdedit(&["/set", &guid, "path", &path_arg]);
+                let _ = run_bcdedit(&["/set", "{fwbootmgr}", "displayorder", &guid, "/addfirst"]);
+                final_guid = Some(guid);
             }
+        }
+
+        if hijack_ok {
+            log.push("UEFI Firmware Handoff scharfgestellt. VM/PC startet direkt in Linux RAMFS.".to_string());
+            return (Some(esp_target), final_guid, true);
         }
     }
 
@@ -427,8 +457,22 @@ pub fn stage_vm_handoff(
         bat.push_str(cmd);
         bat.push_str("\r\n");
     }
-    bat.push_str("\r\necho [Bifrost] BCD Entry !BIFROST_GUID! aktiviert. System kann neu gestartet werden.\r\n");
+    bat.push_str("\r\necho [Bifrost] UEFI Boot Hand-off scharfgestellt. System kann neu gestartet werden.\r\n");
     fs::write(&efi_batch_script, bat)?;
+
+    let restore_batch_script = stage_dir.join("restore_windows_boot.bat");
+    let clean_drive = esp_drive.trim_end_matches(['\\', '/']);
+    let restore_bat = format!(
+        "@echo off\r\n\
+echo [Bifrost] Stelle originalen Windows Bootloader wieder her...\r\n\
+if not exist {clean_drive}\\EFI mountvol {clean_drive} /S\r\n\
+if exist {clean_drive}\\EFI\\Microsoft\\Boot\\bootmgfw.efi.winbak copy /Y {clean_drive}\\EFI\\Microsoft\\Boot\\bootmgfw.efi.winbak {clean_drive}\\EFI\\Microsoft\\Boot\\bootmgfw.efi\r\n\
+if exist {clean_drive}\\EFI\\Boot\\bootx64.efi.winbak copy /Y {clean_drive}\\EFI\\Boot\\bootx64.efi.winbak {clean_drive}\\EFI\\Boot\\bootx64.efi\r\n\
+bcdedit /deletevalue {{bootmgr}} bootsequence 2>nul\r\n\
+bcdedit /deletevalue {{fwbootmgr}} bootsequence 2>nul\r\n\
+echo [Bifrost] Wiederherstellung abgeschlossen. Windows Boot Manager ist wieder aktiv.\r\n"
+    );
+    fs::write(&restore_batch_script, restore_bat)?;
 
     let ramfs_runner_script = stage_dir.join("run_ramfs_migration.sh");
     let runner_sh = "\
@@ -542,6 +586,8 @@ mod tests {
         assert!(joined.contains("mountvol S: /S"));
         assert!(joined.contains("bcdedit /copy {bootmgr}"));
         assert!(joined.contains("{fwbootmgr} displayorder !BIFROST_GUID! /addfirst"));
-        assert!(joined.contains("bcdedit /bootsequence !BIFROST_GUID!"));
+        assert!(joined.contains("bootmgfw.efi"));
+        assert!(joined.contains("bootx64.efi"));
+        assert!(joined.contains("bcdedit /deletevalue {bootmgr} bootsequence"));
     }
 }
