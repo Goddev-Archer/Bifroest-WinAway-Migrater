@@ -1,0 +1,35 @@
+# ============================================================================
+# Stage 1: Statischer musl-Build von Bifroest (zero libc dependencies)
+# ============================================================================
+FROM rust:alpine AS builder
+
+RUN apk add --no-cache musl-dev gcc make pkgconfig
+
+WORKDIR /app
+COPY Cargo.toml logo.txt ./
+COPY src ./src
+
+ENV RUSTFLAGS="-C target-feature=+crt-static"
+RUN cargo build --release
+
+# ============================================================================
+# Stage 2: Minimale RAMFS Runtime-Umgebung für VM & Bare-Metal Migration
+# ============================================================================
+FROM alpine:3.20
+
+RUN apk add --no-cache \
+    ntfs-3g-progs \
+    btrfs-progs \
+    parted \
+    sfdisk \
+    lsblk \
+    e2fsprogs \
+    zstd \
+    tar \
+    util-linux
+
+COPY --from=builder /app/target/release/bifroest /bin/bifroest
+COPY tools/make_initramfs.sh /usr/local/bin/make_initramfs.sh
+RUN chmod +x /bin/bifroest /usr/local/bin/make_initramfs.sh
+
+ENTRYPOINT ["/bin/bifroest"]

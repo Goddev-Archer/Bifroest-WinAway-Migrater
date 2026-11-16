@@ -1,0 +1,9 @@
+/target
+Cargo.lock
+AGENT_PLAN.md
+bifrost_vm_stage/
+*.tar.zst
+*.qcow2
+*.cpio.gz
+
+
