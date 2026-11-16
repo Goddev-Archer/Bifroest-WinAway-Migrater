@@ -1,0 +1,84 @@
+name: Build Bifrost Unified Kernel Image (UKI)
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-uki:
+    name: Build & Publish bifrost-boot.efi
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install musl build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Setup Rust with musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Run unit tests on Linux
+        run: cargo test --lib --tests
+
+      - name: Build static Linux bifroest binary (musl)
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Build Initramfs & extract Alpine LTS Kernel
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work alpine:3.20 sh -c '
+            set -e
+            apk add --no-cache \
+              linux-lts \
+              busybox-static \
+              kmod \
+              ntfs-3g \
+              ntfs-3g-progs \
+              btrfs-progs \
+              parted \
+              sfdisk \
+              util-linux \
+              e2fsprogs \
+              cpio \
+              gzip
+            cp /boot/vmlinuz-lts /work/vmlinuz-lts
+            sed -i "s/\r$//" /work/tools/make_initramfs.sh
+            sh /work/tools/make_initramfs.sh /work/initramfs-bifrost.cpio.gz
+          '
+
+      - name: Install systemd UKI tooling & build bifrost-boot.efi
+        run: |
+          sudo apt-get install -y systemd-ukify systemd-boot-efi binutils
+          sed -i 's/\r$//' tools/build_uki.sh
+          sh tools/build_uki.sh vmlinuz-lts initramfs-bifrost.cpio.gz bifrost-boot.efi
+          ls -lh bifrost-boot.efi
+
+      - name: Upload bifrost-boot.efi artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-boot-uki
+          path: bifrost-boot.efi
+
+      - name: Publish bifrost-boot.efi to v0.1.0-experimental release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view v0.1.0-experimental >/dev/null 2>&1; then
+            gh release create v0.1.0-experimental \
+              --prerelease \
+              --title "v0.1.0-experimental (Definitiv-Nicht-Final-Und-Experimentell)" \
+              --notes "Automated experimental release containing Windows binary and Unified Kernel Image (bifrost-boot.efi)."
+          fi
+          gh release upload v0.1.0-experimental bifrost-boot.efi --clobber

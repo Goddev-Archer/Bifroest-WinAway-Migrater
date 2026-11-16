@@ -506,6 +506,7 @@ fn run_vm_self_test() -> io::Result<()> {
     let handoff = bridge::handoff::stage_vm_handoff(&win_prof, &pack_res)?;
     println!("      Stage-Dir: {}", handoff.stage_dir.display());
     println!("      EFI-Script: {}", handoff.efi_batch_script.display());
+    println!("      ESP-Drive: {} | Secure Boot: {}", handoff.esp_drive, handoff.secure_boot_enabled);
 
     println!("[4/5] Führe Linux RAMFS Bridge Pipeline (Dry-Run Sandbox) aus...");
     let summary = bridge::execute_full_bridge_pipeline(
@@ -779,6 +780,17 @@ fn handle_key(app: &mut App, code: KeyCode) {
         Phase::Executing => match code {
             KeyCode::Char('b') | KeyCode::Char('B') => {
                 app.start_vm_bridge_simulation();
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                if !app.is_packing.load(Ordering::SeqCst) && !app.is_bridging.load(Ordering::SeqCst) {
+                    #[cfg(target_os = "windows")]
+                    {
+                        let _ = std::process::Command::new("shutdown")
+                            .args(["/r", "/t", "3", "/c", "Bifrost Linux RAMFS Migration Handoff"])
+                            .spawn();
+                    }
+                    app.should_quit = true;
+                }
             }
             KeyCode::Enter | KeyCode::Esc => {
                 if !app.is_packing.load(Ordering::SeqCst) && !app.is_bridging.load(Ordering::SeqCst) {
@@ -1341,12 +1353,58 @@ fn render_phase_executing(f: &mut Frame, area: Rect, block: Block, app: &App) {
             if let Ok(hlock) = app.handoff_result.lock() {
                 if let Some(h) = hlock.as_ref() {
                     lines.push(Line::from(vec![
-                        Span::styled(" [✓] VM Handoff bereit: ", Style::default().fg(C_SUCCESS)),
+                        Span::styled(" [✓] VM Handoff Stage: ", Style::default().fg(C_SUCCESS)),
                         Span::styled(
-                            format!("{} (inkl. stage_efi_boot.bat & bifrost_manifest.json)", h.stage_dir.display()),
+                            format!("{}", h.stage_dir.display()),
                             Style::default().fg(C_TEXT_BRIGHT),
                         ),
                     ]));
+
+                    if let Some(uki_path) = &h.uki_staged_path {
+                        lines.push(Line::from(vec![
+                            Span::styled(" [✓] UKI Kernel-Image: ", Style::default().fg(C_SUCCESS)),
+                            Span::styled(format!("{}", uki_path.display()), Style::default().fg(C_TEXT_BRIGHT)),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![
+                            Span::styled(" [!] UKI Kernel-Image: ", Style::default().fg(C_WARN_TITLE)),
+                            Span::styled(
+                                "Nicht auf ESP platziert (Offline oder Admin-Rechte fehlen)",
+                                Style::default().fg(C_WARN_BORDER),
+                            ),
+                        ]));
+                    }
+
+                    if h.bcd_armed {
+                        let guid_str = h.bcd_guid.as_deref().unwrap_or("{aktiv}");
+                        lines.push(Line::from(vec![
+                            Span::styled(" [✓] UEFI One-Time Boot: ", Style::default().fg(C_SUCCESS)),
+                            Span::styled(
+                                format!("BCD BootSequence SCHARF ({guid_str}) -> Bereit für Reboot!"),
+                                Style::default().fg(C_TEXT_BRIGHT).add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+                    } else {
+                        let last_msg = h
+                            .status_log
+                            .last()
+                            .map(|s| s.as_str())
+                            .unwrap_or("BCD nicht automatisch scharfgestellt (stage_efi_boot.bat als Admin starten)");
+                        lines.push(Line::from(vec![
+                            Span::styled(" [!] UEFI One-Time Boot: ", Style::default().fg(C_WARN_TITLE)),
+                            Span::styled(last_msg.to_string(), Style::default().fg(C_WARN_BORDER)),
+                        ]));
+                    }
+
+                    if h.secure_boot_enabled {
+                        lines.push(Line::from(vec![
+                            Span::styled(" [!] SECURE BOOT AKTIV: ", Style::default().fg(C_WARN_TITLE).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                "Unsigniertes UKI könnte blockiert werden! In Hyper-V Secure Boot deaktivieren.",
+                                Style::default().fg(C_WARN_BORDER),
+                            ),
+                        ]));
+                    }
                 }
             }
 
@@ -1388,7 +1446,10 @@ fn render_phase_executing(f: &mut Frame, area: Rect, block: Block, app: &App) {
             }
 
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("Drücke [Enter] oder [Q] zum Beenden.", Style::default().fg(C_MUTED))));
+            lines.push(Line::from(Span::styled(
+                "Drücke [R] zum Neustart ins RAMFS oder [Enter] / [Q] zum Beenden.",
+                Style::default().fg(C_MUTED),
+            )));
         }
     }
 
@@ -1517,6 +1578,8 @@ fn render_guided_footer(f: &mut Frame, area: Rect, app: &App) {
         Phase::Executing => Line::from(vec![
             Span::styled("[B] ", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
             Span::styled("VM-Bridge Test  ", Style::default().fg(C_MUTED)),
+            Span::styled("[R] ", Style::default().fg(C_WARN_TITLE).add_modifier(Modifier::BOLD)),
+            Span::styled("Reboot ins RAMFS  ", Style::default().fg(C_TEXT_BRIGHT)),
             Span::styled("[Enter / Q] ", Style::default().fg(C_TEXT_BRIGHT).add_modifier(Modifier::BOLD)),
             Span::styled("Beenden", Style::default().fg(C_MUTED)),
         ]),

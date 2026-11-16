@@ -247,11 +247,22 @@ fn read_sysfs_partitions(
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(0);
 
-        let fs_type = find_lsblk_str(lsblk_json, &pname, "fstype").unwrap_or_default();
+        let mut fs_type = find_lsblk_str(lsblk_json, &pname, "fstype").unwrap_or_default();
+        let part_dev_path = format_partition_path(disk_dev, part_number);
+        if fs_type.is_empty() {
+            if let Ok(out) = Command::new("blkid")
+                .args(["-s", "TYPE", "-o", "value", &part_dev_path.to_string_lossy()])
+                .output()
+            {
+                if out.status.success() {
+                    fs_type = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                }
+            }
+        }
         let label = find_lsblk_str(lsblk_json, &pname, "label");
 
         parts.push(PartitionEntry {
-            dev_path: format_partition_path(disk_dev, part_number),
+            dev_path: part_dev_path,
             part_number,
             start_sector,
             size_sectors,
@@ -351,18 +362,21 @@ pub fn calculate_shrink_plan(
 
     let win_end_mib = (ntfs_part.start_sector * sector_size + ntfs_shrunk_bytes) / MIB;
     let linux_start_mib = (linux_start_sector * sector_size) / MIB;
+    let linux_end_mib = ((linux_start_sector + linux_size_sectors) * sector_size) / MIB;
 
     let disk_str = disk.dev_path.to_string_lossy();
     let win_str = ntfs_part.dev_path.to_string_lossy();
 
     let commands_to_run = vec![
         format!("ntfsresize --no-action --size {ntfs_shrunk_bytes} {win_str}"),
-        format!("ntfsresize --force --size {ntfs_shrunk_bytes} {win_str}"),
+        format!("yes | ntfsresize --force --force --no-progress-bar --size {ntfs_shrunk_bytes} {win_str}"),
         format!(
             "parted ---pretend-input-tty -s {disk_str} resizepart {} {win_end_mib}MiB Yes",
             ntfs_part.part_number
         ),
-        format!("parted -s {disk_str} mkpart BIFROEST_LINUX btrfs {linux_start_mib}MiB 100%"),
+        format!(
+            "parted -s {disk_str} mkpart BIFROEST_LINUX btrfs {linux_start_mib}MiB {linux_end_mib}MiB"
+        ),
         format!("partprobe {disk_str}"),
     ];
 
@@ -392,6 +406,13 @@ pub fn execute_partition_plan<F>(
 where
     F: FnMut(&str, usize, usize),
 {
+    #[cfg(target_os = "linux")]
+    if !dry_run {
+        let win_str = plan.windows_ntfs_partition.to_string_lossy();
+        let _ = Command::new("umount").arg(win_str.as_ref()).output();
+        let _ = Command::new("ntfsfix").args(["-d", win_str.as_ref()]).output();
+    }
+
     let total = plan.commands_to_run.len();
     for (idx, cmd) in plan.commands_to_run.iter().enumerate() {
         let prefix = if dry_run || !cfg!(target_os = "linux") {
