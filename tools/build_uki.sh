@@ -48,7 +48,7 @@ ID=bifrost
 VERSION_ID="0.1.0"
 EOF
 
-printf '%s\0' "$CMDLINE" > "$WORK_DIR/cmdline.txt"
+printf '%s' "$CMDLINE" > "$WORK_DIR/cmdline.txt"
 
 UKIFY_BIN="$(command -v ukify || true)"
 if [ -z "$UKIFY_BIN" ] && [ -x /usr/lib/systemd/ukify ]; then

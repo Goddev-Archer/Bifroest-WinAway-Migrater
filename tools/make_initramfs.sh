@@ -8,7 +8,9 @@ WORK_DIR="$(mktemp -d /tmp/bifrost_initramfs.XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 echo "[Bifrost] Erstelle Initramfs-Verzeichnisstruktur in $WORK_DIR..."
-mkdir -p "$WORK_DIR"/{bin,sbin,etc,proc,sys,dev,run,tmp,mnt,lib,lib64,usr/bin,usr/sbin,usr/lib,var/lib/bifrost}
+for d in bin sbin etc proc sys dev run tmp mnt lib lib64 usr/bin usr/sbin usr/lib var/lib/bifrost; do
+  mkdir -p "$WORK_DIR/$d"
+done
 
 copy_with_libs() {
   BIN_NAME="$1"
