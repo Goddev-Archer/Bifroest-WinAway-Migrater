@@ -103,7 +103,7 @@ else
 fi
 
 # Symlinks für BusyBox Applets (bestehende echte Binaries wie modprobe nicht überschreiben)
-for cmd in sh mount umount mdev insmod mkdir find head cp rm cat echo grep sleep clear poweroff reboot ls yes dd df chmod chown chroot; do
+for cmd in sh mount umount mdev insmod mkdir find head cp rm cat echo grep sleep clear poweroff reboot ls yes dd df chmod chown chroot cttyhack setsid; do
   if [ ! -e "$WORK_DIR/bin/$cmd" ]; then
     ln -sf /bin/busybox "$WORK_DIR/bin/$cmd"
   fi
@@ -122,6 +122,15 @@ done
 echo "root:x:0:0:root:/root:/bin/sh" > "$WORK_DIR/etc/passwd"
 echo "root:x:0:" > "$WORK_DIR/etc/group"
 echo "bifroest-ramfs" > "$WORK_DIR/etc/hostname"
+
+# Static device nodes for guaranteed early console
+mkdir -p "$WORK_DIR/dev"
+mknod -m 600 "$WORK_DIR/dev/console" c 5 1 2>/dev/null || true
+mknod -m 666 "$WORK_DIR/dev/tty" c 5 0 2>/dev/null || true
+mknod -m 620 "$WORK_DIR/dev/tty0" c 4 0 2>/dev/null || true
+mknod -m 620 "$WORK_DIR/dev/tty1" c 4 1 2>/dev/null || true
+mknod -m 666 "$WORK_DIR/dev/null" c 1 3 2>/dev/null || true
+mknod -m 666 "$WORK_DIR/dev/zero" c 1 5 2>/dev/null || true
 
 # Early-Boot /init Skript (läuft als PID 1 in der VM / im RAMFS)
 cat << 'EOF' > "$WORK_DIR/init"
@@ -142,11 +151,13 @@ elif [ -c /dev/console ]; then
   exec </dev/console >/dev/console 2>&1
 fi
 
-clear
+echo ""
+echo "============================================="
 echo "=== Bifrost Linux RAMFS Migration Kernel ==="
+echo "============================================="
 echo "[Init] Lade Storage-, Hyper-V- und Dateisystem-Treiber..."
 
-for mod in hv_vmbus hv_storvsc hv_utils hid hid_hyperv scsi_mod sd_mod nvme virtio_pci virtio_blk virtio_scsi btrfs vfat fat nls_cp437 nls_iso8859_1 fuse ntfs3 ext4; do
+for mod in hv_vmbus hyperv_fb hyperv_drm fbdev hv_storvsc hv_utils hid hid_hyperv scsi_mod sd_mod nvme virtio_pci virtio_blk virtio_scsi btrfs vfat fat nls_cp437 nls_iso8859_1 fuse ntfs3 ext4; do
   modprobe "$mod" 2>/dev/null || true
 done
 
@@ -188,10 +199,10 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
       cp -a /lib/. /mnt/target_linux/lib/ 2>/dev/null || true
       echo "=== Bifrost Migration abgeschlossen ==="
       echo "Öffne Verifikations-Shell im RAMFS (tippe 'reboot -f' zum Neustart)."
-      exec /bin/sh
+      exec setsid cttyhack /bin/sh 2>/dev/null || exec /bin/sh
     else
       echo "[ERROR] Bifröst RAMFS Engine meldete einen Fehler!"
-      exec /bin/sh
+      exec setsid cttyhack /bin/sh 2>/dev/null || exec /bin/sh
     fi
   else
     echo "[WARN] Keine bifrost_blackbox.tar.zst auf lokalen Partitionen gefunden."
@@ -199,8 +210,8 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
   fi
 fi
 
-/bin/bifroest </dev/tty0 >/dev/tty0 2>&1 || /bin/sh
-exec /bin/sh
+/bin/bifroest </dev/tty0 >/dev/tty0 2>&1 || true
+exec setsid cttyhack /bin/sh 2>/dev/null || exec /bin/sh
 EOF
 
 chmod +x "$WORK_DIR/init" "$WORK_DIR/bin/bifroest"
