@@ -1,136 +1,106 @@
 # AGENTS.md – Directives for Argon: Zero-BIOS-Interaction Migration Pipeline
 
 > **Role & Assignment:** Argon (Orchestration & Systems Integration Agent)  
-> **Mission:** Transform Bifröst from an interactive dry-run tool into a **fully automated, zero-BIOS, zero-USB, zero-DVD in-place migration engine** from Windows 11 to Linux.  
-> **Core Architectural Principle:** The user must NEVER be forced to enter BIOS/UEFI settings, burn an ISO, or insert physical boot media. The entire handoff must happen programmatically from within Windows.
+> **Mission:** Transform Bifröst from an interactive prototype into a **fully automated, production-grade, zero-BIOS, zero-USB, zero-DVD in-place migration engine** from Windows 11 to native Linux (Arch Linux, Fedora, Debian).  
+> **Core Architectural Principle:** The user must NEVER be forced to enter BIOS/UEFI settings, burn an ISO, or insert physical boot media. The entire migration must happen programmatically from within Windows, transitioning seamlessly into Linux RAMFS.
 
 ---
 
-## 1. Incident & Root Cause Analysis (Status Quo)
+## 1. Architectural Status & Lessons Learned (v0.2.0)
 
-### What Happened in v0.1.0:
-1. The user executed `bifroest.exe` inside the Tiny11 test VM (`Test-Computer`).
-2. Hardware inspection, disk scanner, candidate selection, and blackbox packaging (`bifrost_blackbox.tar.zst`) completed successfully.
-3. The user executed `stage_efi_boot.bat` and rebooted the VM.
-4. **Failure:** The VM booted straight back into the Windows 11 login screen (`RemoveThisShittySys`).
+### What Succeeded:
+1. **Zero-BIOS Hyper-V & Physical Handoff:** UEFI booting directly into `bifrost-boot.efi` via ESP staging (`S:\EFI\Bifrost\bifrost-boot.efi`) and Windows BCD one-time boot arming (`bcdedit /bootsequence`).
+2. **Hyper-V Storage Discovery:** Alpine `linux-virt` kernel with built-in `CONFIG_SCSI_HYPERV=y` and `CONFIG_HYPERV=y` identifies `/dev/sda` instantaneously.
+3. **RAM-First Preservation:** Windows partition is mounted read-only, `bifrost_blackbox.tar.zst` is copied to `/tmp/` in RAM, and Windows is unmounted before any disk-altering operations begin.
 
-### Root Cause:
-1. **Unarmed BCD Scripts:** `src/bridge/handoff.rs` generated a template batch script where the critical BCD activation commands were commented out with `rem` (`rem bcdedit /set {NEW_GUID} ...`, `rem bcdedit /bootsequence ...`).
-2. **Missing Migration Kernel & Initramfs:** Neither `vmlinuz-bifrost.efi` nor `initramfs-bifrost.img` were downloaded, generated, or copied to the EFI System Partition (ESP). Windows Boot Manager found no valid alternate OS and booted default Windows.
-3. **Manual Human Burden:** Expecting the user to copy-paste BCD GUIDs or manually adjust UEFI settings breaks the core UX promise of Bifröst.
+### Identified Bottlenecks:
+1. **The "Demo Gap" (Missing Real Distro Rootfs):** Previously, `deploy_base_system` was called with `base_rootfs_archive: None`. While partitions and Btrfs subvolumes (`@root`, `@home`, `@blackbox`) were created, no actual Linux operating system (Kernel, `/usr/bin`, `pacman`, `systemd`) was installed. The system rebooted into an empty root subvolume.
+2. **NTFS Shrink Brittleness:** Windows 11 NTFS partitions with active dirty flags, volume log checks, or fragmented tail clusters cause `ntfsresize` or `parted resizepart` to fail or reject shrinking.
+3. **Control Character Terminal Clutter:** Unfiltered `\r` (carriage returns) from progress meters in subcommands caused Crossterm cursor position de-synchronization, scattering progress text across the TUI.
 
 ---
 
-## 2. Target Architecture: Unified Kernel Image (UKI) + Automated BCD Arming
+## 2. Strategic Directives for Argon
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│ WINDOWS RUNTIME (Phase 5: Executing in `bifroest.exe`)                 │
+│ WINDOWS RUNTIME (Phase 5: Packaging & Staging)                        │
 ├────────────────────────────────────────────────────────────────────────┤
-│ 1. Mount ESP silently: `mountvol S: /S`                                │
-│ 2. Stage UKI: Deploy `bifrost-boot.efi` into `S:\EFI\Bifrost\`         │
-│ 3. Arm One-Time Boot: Parse GUID & execute `bcdedit /bootsequence`     │
-│ 4. Request system reboot                                               │
+│ 1. User selects Migration Strategy:                                    │
+│    - [Mode A] Clean Install (Wipe Windows & Maximize Linux Space)      │
+│    - [Mode B] Dual-Boot (Shrink NTFS & Preserve Windows Coexistence)   │
+│ 2. Package Blackbox: `bifrost_blackbox.tar.zst`                        │
+│ 3. Stage Target Distro Rootfs: e.g. `archlinux-bootstrap-x86_64.tar.zst`│
+│ 4. Mount ESP & stage `bifrost-boot.efi`                                │
+│ 5. Arm BCD BootSequence & trigger reboot                               │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │ Reboot (No BIOS keys required)
 ┌───────────────────────────────────▼────────────────────────────────────┐
-│ UEFI FIRMWARE DISPATCH                                                 │
-├────────────────────────────────────────────────────────────────────────┤
-│ UEFI Firmware reads BootSequence -> executes `S:\EFI\Bifrost\bifrost-boot.efi` │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ Single PE/COFF Executable boots into RAM
-┌───────────────────────────────────▼────────────────────────────────────┐
 │ BIFRÖST RAMFS ENVIRONMENT                                              │
 ├────────────────────────────────────────────────────────────────────────┤
-│ - Linux Kernel + Initramfs + Embedded Cmdline (`bifrost_auto=1`)       │
-│ - Runs `bifroest --ramfs` as PID 1                                     │
-│ - Locates `bifrost_blackbox.tar.zst` on Windows NTFS                   │
-│ - Executes non-destructive `ntfsresize`                                │
-│ - Creates Btrfs subvolumes (`@root`, `@home`, `@blackbox`)             │
-│ - Extracts Blackbox + enforces POSIX mode (0700/0600 on `.ssh`)        │
-│ - Deploys systemd-boot to ESP & configures first-boot Flatpak service  │
-│ - Final reboot directly into new native Linux!                         │
+│ 1. Mount Windows NTFS read-only (ro)                                   │
+│ 2. Secure Blackbox & Distro Rootfs into RAM (`/tmp/`)                  │
+│ 3. Unmount Windows partition (`umount /mnt/win_src`)                   │
+│ 4. Partitioning Execution:                                             │
+│    - Mode A (Clean): Re-partition entire disk for Btrfs (Zero NTFS risk)│
+│    - Mode B (Dual):  Run `ntfsresize -ff` & `parted resizepart`        │
+│ 5. Format Btrfs Subvolumes: `@root`, `@home`, `@blackbox`              │
+│ 6. Extract Distro Rootfs into `@root` (Real Linux OS)                  │
+│ 7. Inject Blackbox from RAM into `@home` (Enforce POSIX 0700/0600)     │
+│ 8. Deploy systemd-boot to ESP & configure First-Boot Flatpak service   │
+│ 9. Automated clean reboot directly into native Asgard!                 │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Workstreams & Action Items for Argon
+## 3. Workstreams & Action Items
 
-### Workstream 1: Unified Kernel Image (UKI) Generation
-**Goal:** Produce a single, self-contained `bifrost-boot.efi` binary (~25-35 MB) that contains the Linux kernel, RAMFS, and hardcoded command line.
+### Workstream 1: Migration Strategy Decision (Clean Install vs. Dual-Boot)
+**Goal:** Empower the user to decide whether Windows should be wiped completely or kept alongside Linux.
 
-- [ ] **Cross-Compile Static Linux Binary:**
-  - Build `bifroest` targeting `x86_64-unknown-linux-musl` with `--features ramfs` or standalone.
-  - Zero dynamic libc dependencies.
-- [ ] **Assemble Minimal CPIO Initramfs:**
-  - Incorporate BusyBox (static), `ntfs-3g`, `ntfsresize`, `mkfs.btrfs`, `parted`, `sfdisk`, and static `bifroest`.
-  - Include `/init` script that automatically mounts `/proc`, `/sys`, `/dev` and invokes `/bin/bifroest --ramfs`.
-- [ ] **Combine into UKI (`bifrost-boot.efi`):**
-  - Use `ukify` or `objcopy` with systemd-stub (or Alpine minimal EFI kernel with embedded initramfs):
-    ```bash
-    objcopy \
-      --add-section .osrel=/etc/os-release --change-section-vma .osrel=0x20000 \
-      --add-section .cmdline=cmdline.txt --change-section-vma .cmdline=0x30000 \
-      --add-section .linux=vmlinuz --change-section-vma .linux=0x2000000 \
-      --add-section .initrd=initramfs.cpio.gz --change-section-vma .initrd=0x3000000 \
-      linuxx64.efi.stub bifrost-boot.efi
-    ```
-- [ ] **Release Asset Packaging:**
-  - Publish `bifrost-boot.efi` as a standardized release asset on GitHub (`https://github.com/Goddev-Archer/Bifroest-WinAway-Migrater/releases`).
+- [ ] **Wizard UI Integration (`src/main.rs`):**
+  - Add a dedicated selection step (or toggle in Blueprint/Flightplan):
+    - `Option 1: Clean Install (Empfohlen)`: Replace Windows entirely. Dedicates 100% of the drive to Linux Btrfs.
+    - `Option 2: Dual-Boot`: Shrink NTFS partition and install Linux in the freed space.
+  - Record choice in `MigrationManifest` (`clean_install: bool`).
+- [ ] **Clean-Install Partitioning Engine:**
+  - When `clean_install == true`:
+    - Do NOT run `ntfsresize` or `parted resizepart`.
+    - Delete the Windows partition and create a single large Btrfs partition spanning the rest of the disk.
+    - Formats effortlessly, eliminating all NTFS resize failures.
 
 ---
 
-### Workstream 2: Automated Windows BCD & EFI Staging Engine
-**Goal:** Completely eliminate manual batch editing; `bifroest.exe` must autonomously arm the UEFI bootloader before asking the user to reboot.
+### Workstream 2: Real Distro Rootfs Staging & Deployment
+**Goal:** Eliminate the prototype skeleton; install a genuine, bootable Arch Linux (or selected target distro) on `@root`.
 
-- [ ] **Update `src/bridge/handoff.rs`:**
-  - Implement programmatic ESP mounting:
-    - Check if drive `S:` is free; find next free letter if taken.
-    - Run `mountvol S: /S`.
-  - Implement UKI deployment:
-    - Download or unpack `bifrost-boot.efi` into `S:\EFI\Bifrost\bifrost-boot.efi`.
-  - Implement Automated BCD Registration & Parsing:
-    - Execute:
-      ```cmd
-      bcdedit /copy {bootmgr} /d "Bifrost Linux Bridge (RAMFS)"
-      ```
-    - Parse the returned GUID using regex (`\{[a-fA-F0-9\-]+\}`).
-    - Immediately execute without human intervention:
-      ```cmd
-      bcdedit /set {GUID} path \EFI\Bifrost\bifrost-boot.efi
-      bcdedit /bootsequence {GUID}
-      ```
-  - Implement Safety Validation:
-    - Verify that `S:\EFI\Bifrost\bifrost-boot.efi` exists and is non-empty before calling `bcdedit /bootsequence`.
-    - Detect Secure Boot state (`Confirm-SecureBootUEFI` / registry) and warn if unsigned UKI would be blocked by Hyper-V / firmware.
+- [ ] **Staging the Base Image in Windows:**
+  - In Windows Phase 5/6, download or stage the minimal bootstrap image:
+    - Arch Linux: `archlinux-bootstrap-x86_64.tar.zst` (~180 MB from official mirrors).
+    - Save to `C:\bifrost_rootfs.tar.zst` alongside `bifrost_blackbox.tar.zst`.
+- [ ] **Deploying Rootfs in RAMFS:**
+  - Auto-discovery in RAMFS discovers both `bifrost_blackbox.tar.zst` and `bifrost_rootfs.tar.zst` and buffers them into `/tmp/`.
+  - Pass the rootfs path to `deploy_base_system(&target_root, Some(&rootfs_path), ...)`.
+  - Unpack the rootfs into `@root`.
+  - Configure `/etc/fstab`, copy `/boot/vmlinuz-linux` and initramfs to ESP, and configure `systemd-boot`.
 
 ---
 
-### Workstream 3: End-to-End VM Verification Protocol
-**Goal:** Test and verify the full unbroken chain inside the Tiny11 Hyper-V VM.
+### Workstream 3: Bifröst Bridge Cinema UI & Design Autonomy
+**Goal:** Deliver a breathtaking, glitch-free early boot visual experience.
 
-1. **Pre-flight Check:**
-   - Host drive `C:\` must maintain at least 8-10 GB free space (prevent VM auto-pause).
-   - In Hyper-V VM settings: Set Secure Boot to *Microsoft UEFI Certificate Authority* (or disabled for dev testing).
-2. **Execute In-VM:**
-   - Run `bifroest.exe` in VM.
-   - Choose Linux distro & target Btrfs subvolumes.
-   - Click *ZÜNDUNG / PACKEN*.
-   - Confirm Blackbox is generated and UKI is staged to `S:\EFI\Bifrost\bifrost-boot.efi`.
-3. **Reboot:**
-   - Initiate reboot.
-   - **Acceptance Criteria:** VM must NOT load Windows, but immediately display `=== Bifrost Linux RAMFS Migration Kernel ===`.
-4. **Post-Migration Verification:**
-   - VM boots into new Btrfs root.
-   - `bifrost_blackbox.tar.zst` safely restored to `/home`.
-   - File permissions: `.ssh` is `0700`, keys are `0600`.
-   - Desktop and terminal are fully operational.
+- [ ] **Design Review Mandate for Argon:**
+  - Review the current ASCII and TUI implementation in `src/bridge/ramfs_cinema.rs`.
+  - **Argon has creative authority to adapt, refine, and improve the layout, typography, colors, and flow**, provided that **the core concept of an active, animated Bifröst Rainbow Bridge particle stream is preserved**.
+- [ ] **Terminal Hygiene:**
+  - Guarantee zero cursor distortion: sanitize all command outputs, stripping carriage returns (`\r`) and non-printable control characters.
+  - Maintain the clean, minimalist header (isometric `BRIDGE` title, `THE BRIDGE TO ASGARD`, elapsed timer).
 
 ---
 
 ## 4. Definition of Done (DoD)
-- [ ] No manual batch file editing or GUID copy-pasting is required by the user.
-- [ ] No BIOS/UEFI boot menu intervention is needed.
-- [ ] `bifroest.exe` arms the one-time boot sequence automatically.
-- [ ] The VM transitions from Windows directly into the Linux RAMFS and finalizes the installation.
+- [ ] User can explicitly choose between *Clean Install* (full wipe) and *Dual-Boot* (shrink).
+- [ ] Blackbox is 100% preserved in RAM during Clean Install and restored to `/home`.
+- [ ] A real base rootfs (Arch Linux) is extracted to `@root`, providing actual binaries (`/bin/sh`, `pacman`, `vmlinuz-linux`).
+- [ ] The VM reboots directly into a working Linux shell or desktop without falling back to UEFI setup.
