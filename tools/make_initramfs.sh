@@ -127,6 +127,7 @@ mknod -m 620 "$WORK_DIR/dev/tty0" c 4 0 2>/dev/null || true
 mknod -m 620 "$WORK_DIR/dev/tty1" c 4 1 2>/dev/null || true
 mknod -m 666 "$WORK_DIR/dev/null" c 1 3 2>/dev/null || true
 mknod -m 666 "$WORK_DIR/dev/zero" c 1 5 2>/dev/null || true
+mknod -m 666 "$WORK_DIR/dev/fuse" c 10 229 2>/dev/null || true
 
 # Early-Boot /init Skript (läuft als PID 1 in der VM / im RAMFS)
 cat << 'EOF' > "$WORK_DIR/init"
@@ -162,9 +163,18 @@ for mod in hv_vmbus hyperv_keyboard hyperv_drm hv_storvsc hv_utils hid hid_hyper
   modprobe "$mod" 2>/dev/null || true
 done
 
-mdev -s 2>/dev/null || true
-sleep 2
-mdev -s 2>/dev/null || true
+[ -c /dev/fuse ] || mknod -m 666 /dev/fuse c 10 229 2>/dev/null || true
+
+kmsg_log "Warte auf Initialisierung der Festplatten (SCSI/VMBus)..."
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  mdev -s 2>/dev/null || true
+  PARTS=$(ls -1 /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* /dev/nvme[0-9]n[0-9]p[0-9]* 2>/dev/null || true)
+  if [ -n "$PARTS" ]; then
+    kmsg_log "Partitionen nach ${i}s gefunden: $PARTS"
+    break
+  fi
+  sleep 1
+done
 
 if grep -q "bifrost_auto=1" /proc/cmdline; then
   kmsg_log "Suche bifrost_blackbox.tar.zst auf lokalen Partitionen..."
