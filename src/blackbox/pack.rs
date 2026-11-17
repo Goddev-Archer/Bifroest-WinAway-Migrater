@@ -37,6 +37,33 @@ pub fn create_blackbox_archive<F>(
     software: &[DiscoveredSoftware],
     target_distro: &str,
     target_filesystem: &str,
+    progress_cb: F,
+) -> io::Result<PackResult>
+where
+    F: FnMut(PackProgress),
+{
+    create_blackbox_archive_with_mode(
+        dest_path,
+        user_profile,
+        candidates,
+        git_repos,
+        software,
+        target_distro,
+        target_filesystem,
+        true,
+        progress_cb,
+    )
+}
+
+pub fn create_blackbox_archive_with_mode<F>(
+    dest_path: &Path,
+    user_profile: &Path,
+    candidates: &[CandidateItem],
+    git_repos: &[GitRepoInfo],
+    software: &[DiscoveredSoftware],
+    target_distro: &str,
+    target_filesystem: &str,
+    clean_install: bool,
     mut progress_cb: F,
 ) -> io::Result<PackResult>
 where
@@ -140,6 +167,7 @@ where
         source_os: "Windows 11".to_string(),
         target_distro: target_distro.to_string(),
         target_filesystem: target_filesystem.to_string(),
+        clean_install,
         user_profile: user_profile.to_path_buf(),
         target_username,
         selected_software,

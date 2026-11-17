@@ -396,6 +396,86 @@ pub fn calculate_shrink_plan(
     })
 }
 
+/// Computes a Clean-Install GPT partitioning plan that removes Windows and dedicates remaining disk space to Btrfs.
+pub fn calculate_clean_install_plan(disk: &BlockDevice) -> Result<ShrinkAndPartitionPlan, String> {
+    let sector_size = if disk.sector_size > 0 {
+        disk.sector_size
+    } else {
+        SECTOR_SIZE_DEFAULT
+    };
+    let sectors_per_mib = MIB / sector_size;
+
+    let efi_part = disk
+        .partitions
+        .iter()
+        .find(|p| p.fs_type.eq_ignore_ascii_case("vfat") || p.part_number == 1)
+        .ok_or_else(|| "Keine EFI-Systempartition gefunden.".to_string())?;
+
+    let ntfs_part = disk
+        .partitions
+        .iter()
+        .filter(|p| p.part_number != efi_part.part_number)
+        .find(|p| p.fs_type.eq_ignore_ascii_case("ntfs"))
+        .or_else(|| {
+            disk.partitions
+                .iter()
+                .filter(|p| p.part_number != efi_part.part_number)
+                .max_by_key(|p| p.size_bytes)
+        })
+        .ok_or_else(|| "Keine Windows-Partition zum Ersetzen gefunden.".to_string())?;
+
+    let linux_start_sector = ((ntfs_part.start_sector + sectors_per_mib - 1) / sectors_per_mib) * sectors_per_mib;
+    let total_sectors = disk.total_bytes / sector_size;
+    let usable_end_sector = total_sectors.saturating_sub(2048);
+    if usable_end_sector <= linux_start_sector {
+        return Err("Nicht genügend Sektoren nach der EFI-Partition verfügbar.".to_string());
+    }
+    let linux_size_sectors = ((usable_end_sector - linux_start_sector) / sectors_per_mib) * sectors_per_mib;
+    if linux_size_sectors < sectors_per_mib {
+        return Err("Zielgröße für Linux muss mindestens 1 MiB betragen.".to_string());
+    }
+
+    let linux_target_bytes = linux_size_sectors * sector_size;
+    let linux_start_mib = (linux_start_sector * sector_size) / MIB;
+    let disk_str = disk.dev_path.to_string_lossy();
+
+    let mut to_remove: Vec<u32> = disk
+        .partitions
+        .iter()
+        .filter(|p| p.part_number >= ntfs_part.part_number)
+        .map(|p| p.part_number)
+        .collect();
+    to_remove.sort_by(|a, b| b.cmp(a));
+
+    let mut commands_to_run: Vec<String> = to_remove
+        .into_iter()
+        .map(|pnum| format!("parted -s {disk_str} rm {pnum}"))
+        .collect();
+    commands_to_run.push(format!(
+        "parted -s {disk_str} mkpart BIFROEST_LINUX btrfs {linux_start_mib}MiB 100%"
+    ));
+    commands_to_run.push(format!("partprobe {disk_str}"));
+
+    let new_linux_part_number = ntfs_part.part_number;
+    let new_linux_partition = format_partition_path(&disk.dev_path, new_linux_part_number);
+
+    Ok(ShrinkAndPartitionPlan {
+        target_disk: disk.dev_path.clone(),
+        is_virtual_disk: disk.is_virtual_disk,
+        efi_partition: efi_part.dev_path.clone(),
+        windows_ntfs_partition: ntfs_part.dev_path.clone(),
+        windows_part_number: ntfs_part.part_number,
+        new_linux_partition,
+        new_linux_part_number,
+        ntfs_original_bytes: ntfs_part.size_bytes,
+        ntfs_shrunk_bytes: 0,
+        linux_target_bytes,
+        linux_start_sector,
+        linux_size_sectors,
+        commands_to_run,
+    })
+}
+
 /// Executes or dry-runs the computed shrink & partitioning command sequence.
 pub fn execute_partition_plan<F>(
     plan: &ShrinkAndPartitionPlan,
@@ -408,8 +488,11 @@ where
     #[cfg(target_os = "linux")]
     if !dry_run {
         let win_str = plan.windows_ntfs_partition.to_string_lossy();
+        let _ = Command::new("umount").arg("/mnt/win_src").output();
         let _ = Command::new("umount").arg(win_str.as_ref()).output();
-        let _ = Command::new("ntfsfix").args(["-d", win_str.as_ref()]).output();
+        if plan.ntfs_shrunk_bytes > 0 {
+            let _ = Command::new("ntfsfix").args(["-d", win_str.as_ref()]).output();
+        }
     }
 
     let total = plan.commands_to_run.len();
@@ -442,6 +525,11 @@ where
                 ));
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    if !dry_run {
+        let _ = Command::new("mdev").arg("-s").output();
     }
 
     Ok(())

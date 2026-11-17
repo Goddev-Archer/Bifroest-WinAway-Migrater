@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use bootstrap::deploy_base_system;
 use fs::setup_target_filesystems;
 use inject::{inject_blackbox_archive, InjectionReport};
+pub use partition::calculate_clean_install_plan;
 use partition::{
     calculate_shrink_plan, discover_block_devices, execute_partition_plan, ShrinkAndPartitionPlan,
 };
@@ -29,12 +30,36 @@ pub struct BridgeExecutionSummary {
     pub target_root: PathBuf,
 }
 
-/// Runs the complete Linux RAMFS migration pipeline (discovery, NTFS shrink, Btrfs setup, Blackbox injection, bootloader & post-install).
+/// Runs the complete Linux RAMFS migration pipeline using the archive manifest's migration strategy.
 pub fn execute_full_bridge_pipeline<F>(
     archive_path: &Path,
     expected_sha256: Option<&str>,
     target_root: &Path,
     requested_linux_bytes: u64,
+    dry_run: bool,
+    step_cb: F,
+) -> io::Result<BridgeExecutionSummary>
+where
+    F: FnMut(&str, usize, usize),
+{
+    execute_full_bridge_pipeline_with_mode(
+        archive_path,
+        expected_sha256,
+        target_root,
+        requested_linux_bytes,
+        None,
+        dry_run,
+        step_cb,
+    )
+}
+
+/// Runs the complete Linux RAMFS migration pipeline with an optional Clean-Install vs Dual-Boot strategy override.
+pub fn execute_full_bridge_pipeline_with_mode<F>(
+    archive_path: &Path,
+    expected_sha256: Option<&str>,
+    target_root: &Path,
+    requested_linux_bytes: u64,
+    clean_install_override: Option<bool>,
     dry_run: bool,
     mut step_cb: F,
 ) -> io::Result<BridgeExecutionSummary>
@@ -45,7 +70,13 @@ where
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
 
-    // Step 1/5: Discover disks & compute non-destructive ShrinkAndPartitionPlan
+    let clean_install = clean_install_override.unwrap_or_else(|| {
+        inject::read_manifest_from_archive(archive_path)
+            .map(|m| m.clean_install)
+            .unwrap_or(true)
+    });
+
+    // Step 1/5: Discover disks & compute Clean-Install or Dual-Boot PartitionPlan
     step_cb("Ermittle Block-Devices & berechne Partitionsplan...", 1, TOTAL_STEPS);
     let devices = discover_block_devices();
     let disk = devices
@@ -54,52 +85,59 @@ where
         .or_else(|| discover_block_devices().into_iter().next())
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Kein Ziel-Laufwerk gefunden"))?;
 
-    let ntfs_part_opt = disk
-        .partitions
-        .iter()
-        .find(|p| p.fs_type.eq_ignore_ascii_case("ntfs"))
-        .or_else(|| disk.partitions.iter().max_by_key(|p| p.size_bytes));
-
-    let ntfs_max = ntfs_part_opt.map(|p| p.size_bytes).unwrap_or(disk.total_bytes);
-
-    let target_req = if requested_linux_bytes > 0 {
-        requested_linux_bytes
+    let plan = if clean_install {
+        calculate_clean_install_plan(&disk)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?
     } else {
-        32 * GIB
+        let ntfs_part_opt = disk
+            .partitions
+            .iter()
+            .find(|p| p.fs_type.eq_ignore_ascii_case("ntfs"))
+            .or_else(|| disk.partitions.iter().max_by_key(|p| p.size_bytes));
+
+        let ntfs_max = ntfs_part_opt.map(|p| p.size_bytes).unwrap_or(disk.total_bytes);
+
+        let target_req = if requested_linux_bytes > 0 {
+            requested_linux_bytes
+        } else {
+            32 * GIB
+        };
+
+        let min_needed_by_files = if let Some(ntfs_part) = ntfs_part_opt {
+            crate::bridge::partition::query_ntfs_minimum_size(&ntfs_part.dev_path)
+        } else {
+            None
+        };
+
+        // Never clamp below needed + 512 MiB so ntfsresize succeeds safely
+        let min_ntfs_remaining = if let Some(needed) = min_needed_by_files {
+            (needed + 512 * MIB).min(ntfs_max.saturating_sub(512 * MIB))
+        } else if ntfs_max > 24 * GIB {
+            12 * GIB
+        } else {
+            (ntfs_max * 75 / 100).min(ntfs_max.saturating_sub(1024 * MIB))
+        };
+
+        let max_allocatable = ntfs_max.saturating_sub(min_ntfs_remaining + 64 * MIB);
+        let effective_linux_bytes = target_req.min(max_allocatable).max(MIB);
+
+        calculate_shrink_plan(&disk, effective_linux_bytes, min_ntfs_remaining)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?
     };
 
-    let min_needed_by_files = if let Some(ntfs_part) = ntfs_part_opt {
-        crate::bridge::partition::query_ntfs_minimum_size(&ntfs_part.dev_path)
-    } else {
-        None
-    };
-
-    // Safely clamp requested Linux partition size and minimum remaining NTFS space
-    let min_ntfs_remaining = if let Some(needed) = min_needed_by_files {
-        // Keep actual files + 512 MiB safety buffer, leaving at least 4 GiB for Linux if possible
-        (needed + 512 * MIB).max(12 * GIB).min(ntfs_max.saturating_sub(4 * GIB))
-    } else if ntfs_max > 24 * GIB {
-        8 * GIB
-    } else {
-        // For small VM disks (~20 GB), keep at least 12-14 GB for Windows files
-        (ntfs_max * 6 / 10).max(12 * GIB).min(ntfs_max.saturating_sub(4 * GIB))
-    };
-
-    let max_allocatable = ntfs_max.saturating_sub(min_ntfs_remaining + 64 * MIB);
-    let effective_linux_bytes = target_req.min(max_allocatable).max(MIB);
-
-    let plan = calculate_shrink_plan(&disk, effective_linux_bytes, min_ntfs_remaining)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-    // Step 2/5: Execute partition plan (ntfsresize + parted)
-    step_cb(
-        &format!(
-            "Führe NTFS-Shrink & GPT-Anpassung auf {} durch...",
+    // Step 2/5: Execute partition plan (Clean Install wipe or Dual-Boot NTFS shrink)
+    let phase2_msg = if clean_install {
+        format!(
+            "Clean Install: Ersetze Windows-Partition & erstelle Btrfs-Ziel auf {}...",
             plan.target_disk.display()
-        ),
-        2,
-        TOTAL_STEPS,
-    );
+        )
+    } else {
+        format!(
+            "Dual-Boot: Führe NTFS-Shrink & GPT-Anpassung auf {} durch...",
+            plan.target_disk.display()
+        )
+    };
+    step_cb(&phase2_msg, 2, TOTAL_STEPS);
     execute_partition_plan(&plan, dry_run, |cmd_msg, idx, total| {
         let _ = (idx, total);
         step_cb(cmd_msg, 2, TOTAL_STEPS);
@@ -132,11 +170,28 @@ where
         },
     )?;
 
-    // Step 5/5: Deploy systemd-boot & Flatpak first-boot provisioning service
-    step_cb("Deploye systemd-boot & First-Boot Software-Service...", 5, TOTAL_STEPS);
+    if !dry_run {
+        let blackbox_backup_dir = target_root.join("var/lib/bifrost");
+        let _ = std::fs::create_dir_all(&blackbox_backup_dir);
+        let _ = std::fs::copy(
+            archive_path,
+            blackbox_backup_dir.join("bifrost_blackbox.tar.zst"),
+        );
+    }
+
+    // Step 5/5: Extract real Linux rootfs & deploy systemd-boot + first-boot service
+    step_cb("Entpacke Linux-Rootfs & deploye systemd-boot...", 5, TOTAL_STEPS);
+    let rootfs_opt = [
+        Path::new("/tmp/bifrost_rootfs.tar.zst"),
+        Path::new("/usr/share/bifrost/base-rootfs.tar.zst"),
+    ]
+    .into_iter()
+    .find(|p| p.exists())
+    .map(|p| p.to_path_buf());
+
     deploy_base_system(
         target_root,
-        None,
+        rootfs_opt.as_deref(),
         &injection.manifest,
         "BIFROEST-ROOT-UUID",
         dry_run,
@@ -220,6 +275,14 @@ mod tests {
         assert_eq!(plan.linux_start_sector % sectors_per_mib, 0);
         assert_eq!(plan.linux_target_bytes, 40 * GIB);
         assert!(plan.commands_to_run[0].contains("ntfsresize --force --force"));
+
+        let clean_plan = calculate_clean_install_plan(&disk).expect("Clean install plan failed");
+        assert_eq!(clean_plan.new_linux_partition, PathBuf::from("/dev/nvme0n1p3"));
+        assert_eq!(clean_plan.new_linux_part_number, 3);
+        assert_eq!(clean_plan.ntfs_shrunk_bytes, 0);
+        assert!(clean_plan.commands_to_run.iter().any(|c| c.contains("parted -s /dev/nvme0n1 rm 3")));
+        assert!(clean_plan.commands_to_run.iter().any(|c| c.contains("mkpart BIFROEST_LINUX btrfs") && c.contains("100%")));
+        assert!(!clean_plan.commands_to_run.iter().any(|c| c.contains("ntfsresize")));
     }
 
     #[test]

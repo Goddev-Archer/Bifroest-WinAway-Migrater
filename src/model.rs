@@ -75,6 +75,8 @@ pub struct MigrationManifest {
     pub source_os: String,
     pub target_distro: String,
     pub target_filesystem: String,
+    #[serde(default = "default_true")]
+    pub clean_install: bool,
     pub user_profile: PathBuf,
     pub target_username: String,
     pub selected_software: Vec<DiscoveredSoftware>,

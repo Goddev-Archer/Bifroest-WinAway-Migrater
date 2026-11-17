@@ -220,7 +220,7 @@ where
     })
 }
 
-fn read_manifest_from_archive(archive_path: &Path) -> io::Result<MigrationManifest> {
+pub fn read_manifest_from_archive(archive_path: &Path) -> io::Result<MigrationManifest> {
     let f = File::open(archive_path)?;
     let decoder = Decoder::new(BufReader::new(f))?;
     let mut tar = Archive::new(decoder);

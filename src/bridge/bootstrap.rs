@@ -1,13 +1,15 @@
 use std::{
     fs::{self, File},
     io::{self, BufReader},
-    path::Path,
+    path::{Component, Path, PathBuf},
+    thread,
+    time::Duration,
 };
 use tar::Archive;
 use zstd::Decoder;
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 
 #[cfg(target_os = "linux")]
 use std::process::Command;
@@ -96,7 +98,114 @@ WantedBy=multi-user.target
     (service_unit, script)
 }
 
-/// Deploys optional base rootfs, writes `systemd-boot` entries, hostname, and first-boot provisioning service.
+/// Strips optional `root.x86_64/` or `./` prefix and normalizes archive entry paths safely.
+fn sanitize_rootfs_rel_path(raw: &Path) -> Option<PathBuf> {
+    let mut parts: Vec<String> = Vec::new();
+    for comp in raw.components() {
+        if let Component::Normal(s) = comp {
+            parts.push(s.to_string_lossy().into_owned());
+        }
+    }
+    if parts.first().map(|s| s == "root.x86_64").unwrap_or(false) {
+        parts.remove(0);
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for p in parts {
+        out.push(p);
+    }
+    Some(out)
+}
+
+/// Unpacks a compressed `.tar.zst` rootfs archive into `target_root` while preserving Btrfs `/etc/fstab`.
+fn extract_rootfs_archive<F>(
+    rootfs: &Path,
+    target_root: &Path,
+    total_steps: usize,
+    progress_cb: &mut F,
+) -> io::Result<usize>
+where
+    F: FnMut(&str, usize, usize),
+{
+    let f = File::open(rootfs)?;
+    let decoder = Decoder::new(BufReader::new(f))?;
+    let mut tar = Archive::new(decoder);
+    let mut files_count = 0usize;
+
+    for entry_res in tar.entries()? {
+        let mut entry = entry_res?;
+        let raw_path = entry.path()?.to_path_buf();
+        let Some(clean_rel) = sanitize_rootfs_rel_path(&raw_path) else {
+            continue;
+        };
+        let clean_str = clean_rel.to_string_lossy().replace('\\', "/");
+        if clean_str == "etc/fstab" {
+            continue;
+        }
+
+        let dest = target_root.join(&clean_rel);
+        let entry_type = entry.header().entry_type();
+
+        if entry_type.is_dir() {
+            fs::create_dir_all(&dest)?;
+        } else if entry_type.is_symlink() {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if let Ok(Some(link_target)) = entry.link_name() {
+                let _ = fs::remove_file(&dest);
+                #[cfg(unix)]
+                {
+                    let _ = symlink(&link_target, &dest);
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = link_target;
+                }
+            }
+        } else if entry_type.is_hard_link() {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if let Ok(Some(link_name)) = entry.link_name() {
+                if let Some(clean_link) = sanitize_rootfs_rel_path(&link_name) {
+                    let link_target = target_root.join(clean_link);
+                    if link_target.exists() {
+                        let _ = fs::remove_file(&dest);
+                        let _ = fs::hard_link(&link_target, &dest);
+                    }
+                }
+            }
+        } else if entry_type.is_file() {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let _ = fs::remove_file(&dest);
+            let mut out = File::create(&dest)?;
+            io::copy(&mut entry, &mut out)?;
+            #[cfg(unix)]
+            if let Ok(mode) = entry.header().mode() {
+                let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(mode));
+            }
+        }
+
+        files_count += 1;
+        if files_count % 25 == 0 {
+            progress_cb(
+                &format!("Extracting Linux rootfs ({files_count} files): {clean_str}"),
+                1,
+                total_steps,
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    Ok(files_count)
+}
+
+/// Deploys optional base rootfs, writes `systemd-boot` entries, Asgard shell environment, hostname, and first-boot provisioning service.
 pub fn deploy_base_system<F>(
     target_root: &Path,
     base_rootfs_archive: Option<&Path>,
@@ -109,19 +218,30 @@ where
     F: FnMut(&str, usize, usize),
 {
     let total_steps = 4;
+    let fstab_path = target_root.join("etc/fstab");
+    let saved_fstab = fs::read(&fstab_path).ok();
 
     if let Some(rootfs) = base_rootfs_archive {
         if rootfs.exists() && !dry_run {
             progress_cb(&format!("Entpacke Basis-Rootfs {:?}...", rootfs), 1, total_steps);
-            let f = File::open(rootfs)?;
-            let decoder = Decoder::new(BufReader::new(f))?;
-            let mut tar = Archive::new(decoder);
-            tar.unpack(target_root)?;
+            let count = extract_rootfs_archive(rootfs, target_root, total_steps, &mut progress_cb)?;
+            progress_cb(
+                &format!("Linux rootfs entpackt ({count} Eintraege)."),
+                1,
+                total_steps,
+            );
         } else {
             progress_cb("Überspringe Base-Rootfs Entpacken (Dry-Run/Sandbox)...", 1, total_steps);
         }
     } else {
         progress_cb("Bereite Bootloader- & Systemkonfiguration vor...", 1, total_steps);
+    }
+
+    if let Some(fstab_bytes) = saved_fstab {
+        if let Some(parent) = fstab_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&fstab_path, fstab_bytes)?;
     }
 
     progress_cb("Schreibe systemd-boot Konfiguration...", 2, total_steps);
@@ -162,10 +282,74 @@ where
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
     }
 
-    progress_cb("Setze Ziel-Hostname (/etc/hostname)...", 4, total_steps);
+    progress_cb("Konfiguriere Asgard System (/etc/hostname, /etc/os-release, Welcome Shell)...", 4, total_steps);
     let etc_dir = target_root.join("etc");
-    fs::create_dir_all(&etc_dir)?;
-    fs::write(etc_dir.join("hostname"), "bifroest-linux\n")?;
+    let profile_d_dir = etc_dir.join("profile.d");
+    fs::create_dir_all(&profile_d_dir)?;
+
+    fs::write(etc_dir.join("hostname"), "asgard-linux\n")?;
+    fs::write(
+        etc_dir.join("os-release"),
+        "NAME=\"Arch Linux\"\nPRETTY_NAME=\"Arch Linux (Bifrost Asgard)\"\nID=arch\nID_LIKE=archlinux\nHOME_URL=\"https://github.com/Goddev-Archer/Bifroest-WinAway-Migrater\"\n",
+    )?;
+    fs::write(
+        etc_dir.join("inittab"),
+        "::sysinit:/bin/mount -a\n::once:/bin/mdev -s\ntty1::respawn:/bin/sh -l\n::ctrlaltdel:/sbin/reboot\n::shutdown:/bin/umount -a -r\n",
+    )?;
+
+    let username = if manifest.target_username.trim().is_empty() {
+        "linuxuser"
+    } else {
+        manifest.target_username.trim()
+    };
+    let motd_text = format!(
+        "\n======================================================================\n\
+           WELCOME TO ASGARD LINUX  ({distro})\n\
+           Migrated by Bifrost Zero-BIOS Transit Engine\n\
+         ======================================================================\n\
+           Hostname:       asgard-linux\n\
+           Filesystem:     {fs}\n\
+           Restored Home:  /home/{username}\n\
+           Blackbox Vault: /var/lib/bifrost\n\
+         ======================================================================\n\n",
+        distro = manifest.target_distro,
+        fs = manifest.target_filesystem,
+    );
+    fs::write(etc_dir.join("motd"), &motd_text)?;
+
+    let welcome_sh = format!(
+        "#!/bin/sh\n\
+         clear 2>/dev/null || true\n\
+         cat /etc/motd 2>/dev/null || true\n\
+         echo \"[Btrfs Mounts & Subvolumes]\"\n\
+         mount | grep -E 'btrfs|vfat' || df -h /\n\
+         echo \"\"\n\
+         echo \"[Migrated Files in /home/{username}]\"\n\
+         ls -la /home/{username} 2>/dev/null || true\n\
+         echo \"\"\n\
+         export HOME=/home/{username}\n\
+         cd /home/{username} 2>/dev/null || cd /\n"
+    );
+    let welcome_path = profile_d_dir.join("asgard_welcome.sh");
+    fs::write(&welcome_path, welcome_sh)?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&welcome_path, fs::Permissions::from_mode(0o755))?;
+    }
+
+    let etc_profile = etc_dir.join("profile");
+    let existing_profile = fs::read_to_string(&etc_profile).unwrap_or_default();
+    if !existing_profile.contains("asgard_welcome.sh") {
+        let mut updated = existing_profile;
+        updated.push_str("\nfor f in /etc/profile.d/*.sh; do [ -r \"$f\" ] && . \"$f\"; done\n");
+        fs::write(&etc_profile, updated)?;
+    }
+
+    let marker = format!(
+        "distro={}\nfilesystem={}\ntimestamp={}\nuser={}\n",
+        manifest.target_distro, manifest.target_filesystem, manifest.created_at_utc, username
+    );
+    fs::write(target_root.join(".bifrost_installed"), marker)?;
 
     Ok(())
 }

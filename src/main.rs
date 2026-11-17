@@ -28,7 +28,9 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use blackbox::{create_blackbox_archive, PackProgress, PackResult};
+use blackbox::{
+    create_blackbox_archive, create_blackbox_archive_with_mode, PackProgress, PackResult,
+};
 use model::{
     format_bytes, CandidateCategory, CandidateItem, DiscoveredSoftware, DiskScanInfo, GitRepoInfo,
     ScanResult,
@@ -71,6 +73,7 @@ pub enum Phase {
 pub enum BlueprintFocus {
     Distro,
     Filesystem,
+    MigrationMode,
     SoftwareList,
 }
 
@@ -105,6 +108,7 @@ pub struct App {
     pub distros: Vec<&'static str>,
     pub selected_fs: usize,
     pub filesystems: Vec<&'static str>,
+    pub clean_install: bool,
     pub selected_sw_idx: usize,
 
     // Gescannte Live-Daten (werden erst nach dem Gate befüllt!)
@@ -162,6 +166,7 @@ impl App {
                 "Ext4 (Klassisch)",
                 "ZFS (Zpool / Datasets)",
             ],
+            clean_install: true,
             selected_sw_idx: 0,
 
             user_profile,
@@ -258,9 +263,10 @@ impl App {
         let sw = self.software.clone();
         let distro = self.distros[self.selected_distro].to_string();
         let fs = self.filesystems[self.selected_fs].to_string();
+        let clean_install = self.clean_install;
 
         thread::spawn(move || {
-            let res = create_blackbox_archive(
+            let res = create_blackbox_archive_with_mode(
                 &dest,
                 &user_prof,
                 &candidates,
@@ -268,6 +274,7 @@ impl App {
                 &sw,
                 &distro,
                 &fs,
+                clean_install,
                 |p| {
                     if let Ok(mut lock) = progress_arc.lock() {
                         *lock = Some(p);
@@ -802,11 +809,14 @@ fn handle_key(app: &mut App, code: KeyCode) {
                 BlueprintFocus::Filesystem => {
                     app.blueprint_focus = BlueprintFocus::Distro;
                 }
+                BlueprintFocus::MigrationMode => {
+                    app.blueprint_focus = BlueprintFocus::Filesystem;
+                }
                 BlueprintFocus::SoftwareList => {
                     if app.selected_sw_idx > 0 {
                         app.selected_sw_idx -= 1;
                     } else {
-                        app.blueprint_focus = BlueprintFocus::Filesystem;
+                        app.blueprint_focus = BlueprintFocus::MigrationMode;
                     }
                 }
             },
@@ -815,6 +825,9 @@ fn handle_key(app: &mut App, code: KeyCode) {
                     app.blueprint_focus = BlueprintFocus::Filesystem;
                 }
                 BlueprintFocus::Filesystem => {
+                    app.blueprint_focus = BlueprintFocus::MigrationMode;
+                }
+                BlueprintFocus::MigrationMode => {
                     if !app.software.is_empty() {
                         app.blueprint_focus = BlueprintFocus::SoftwareList;
                         app.selected_sw_idx = 0;
@@ -841,6 +854,9 @@ fn handle_key(app: &mut App, code: KeyCode) {
                         app.selected_fs = app.filesystems.len() - 1;
                     }
                 }
+                BlueprintFocus::MigrationMode => {
+                    app.clean_install = !app.clean_install;
+                }
                 BlueprintFocus::SoftwareList => {}
             },
             KeyCode::Right | KeyCode::Char('l') => match app.blueprint_focus {
@@ -850,10 +866,15 @@ fn handle_key(app: &mut App, code: KeyCode) {
                 BlueprintFocus::Filesystem => {
                     app.selected_fs = (app.selected_fs + 1) % app.filesystems.len();
                 }
+                BlueprintFocus::MigrationMode => {
+                    app.clean_install = !app.clean_install;
+                }
                 BlueprintFocus::SoftwareList => {}
             },
             KeyCode::Char(' ') => {
-                if app.blueprint_focus == BlueprintFocus::SoftwareList {
+                if app.blueprint_focus == BlueprintFocus::MigrationMode {
+                    app.clean_install = !app.clean_install;
+                } else if app.blueprint_focus == BlueprintFocus::SoftwareList {
                     if let Some(sw) = app.software.get_mut(app.selected_sw_idx) {
                         sw.will_reinstall = !sw.will_reinstall;
                     }
@@ -865,6 +886,9 @@ fn handle_key(app: &mut App, code: KeyCode) {
         Phase::Flightplan => match code {
             KeyCode::Esc => {
                 app.phase = Phase::Blueprint;
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('m') | KeyCode::Char('M') => {
+                app.clean_install = !app.clean_install;
             }
             KeyCode::Enter => {
                 app.show_last_warning_modal = true;
@@ -1315,9 +1339,30 @@ fn render_phase_blueprint(f: &mut Frame, area: Rect, block: Block, app: &App) {
         Span::styled(" (Pfeiltasten Links/Rechts)", Style::default().fg(C_MUTED)),
     ]));
 
+    let is_mode_focus = app.blueprint_focus == BlueprintFocus::MigrationMode;
+    let mode_pointer = if is_mode_focus { "▶ " } else { "  " };
+    let mode_label = if app.clean_install {
+        "Clean Install (Empfohlen: Windows löschen, Blackbox übernehmen)"
+    } else {
+        "Dual-Boot (Windows verkleinern & parallel behalten)"
+    };
+    let mode_style = if is_mode_focus {
+        Style::default().fg(Color::Black).bg(Color::Gray).add_modifier(Modifier::BOLD)
+    } else if app.clean_install {
+        Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(C_WARN_TITLE).add_modifier(Modifier::BOLD)
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled(mode_pointer, Style::default().fg(C_ACCENT)),
+        Span::styled("Migrations-Modus:     ", Style::default().fg(C_MUTED)),
+        Span::styled(format!("◀  {mode_label}  ▶"), mode_style),
+    ]));
+
     lines.push(Line::from(""));
     let total_sw = app.software.len();
-    let visible_sw_count = 6;
+    let visible_sw_count = 5;
     let sw_scroll_offset = if app.selected_sw_idx >= visible_sw_count {
         app.selected_sw_idx - visible_sw_count + 1
     } else {
@@ -1373,6 +1418,13 @@ fn render_phase_flightplan(f: &mut Frame, area: Rect, block: Block, app: &App) {
     let total_uncompressed: u64 = app.candidates.iter().filter(|c| c.selected).map(|c| c.total_bytes).sum();
     let est_compressed = total_uncompressed / 2;
 
+    let mode_summary = if app.clean_install {
+        "Clean Install (Windows löschen, 100% Disk fuer Linux + Blackbox in RAM)"
+    } else {
+        "Dual-Boot (Windows verkleinern & parallel behalten)"
+    };
+    let mode_color = if app.clean_install { C_SUCCESS } else { C_WARN_TITLE };
+
     lines.push(Line::from(vec![
         Span::styled(" • Quelle:               ", Style::default().fg(C_MUTED)),
         Span::styled(format!("Windows 11 ({:?})", app.user_profile), Style::default().fg(C_TEXT_BRIGHT)),
@@ -1380,6 +1432,10 @@ fn render_phase_flightplan(f: &mut Frame, area: Rect, block: Block, app: &App) {
     lines.push(Line::from(vec![
         Span::styled(" • Ziel:                 ", Style::default().fg(C_MUTED)),
         Span::styled(format!("{target_distro} auf {target_fs}"), Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" • Migrations-Modus:     ", Style::default().fg(C_MUTED)),
+        Span::styled(mode_summary, Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
     ]));
     lines.push(Line::from(vec![
         Span::styled(" • Git Repositories:     ", Style::default().fg(C_MUTED)),
@@ -1401,6 +1457,7 @@ fn render_phase_flightplan(f: &mut Frame, area: Rect, block: Block, app: &App) {
     lines.push(Line::from(Span::styled("───────────────────────────────────────────────────────────────────", Style::default().fg(C_BORDER))));
     lines.push(Line::from(vec![
         Span::styled("[Esc: Zurück]  ", Style::default().fg(C_MUTED)),
+        Span::styled("[←/→ / M: Clean-Install/Dual-Boot]  ", Style::default().fg(C_ACCENT)),
         Span::styled(" [ Enter: ZÜNDUNG / MIGRATION STARTEN ] ", Style::default().bg(C_WARN_BORDER).fg(Color::Black).add_modifier(Modifier::BOLD)),
     ]));
 

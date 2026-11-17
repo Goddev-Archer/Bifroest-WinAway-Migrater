@@ -79,7 +79,8 @@ jobs:
               util-linux \
               e2fsprogs \
               cpio \
-              gzip
+              gzip \
+              zstd
             cp /boot/vmlinuz-virt /work/vmlinuz-virt
             sed -i "s/\r$//" /work/tools/make_initramfs.sh
             sh /work/tools/make_initramfs.sh /work/initramfs-bifrost.cpio.gz
