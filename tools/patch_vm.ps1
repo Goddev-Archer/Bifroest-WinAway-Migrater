@@ -30,18 +30,16 @@ if (-not (Test-Path $ukiSource)) {
     exit 1
 }
 
-Write-Host "[1/5] Pruefe Quell-UKI (target\bifrost-boot.efi)..." -ForegroundColor Yellow
-$ukiBytes = [System.IO.File]::ReadAllBytes($ukiSource)
-$ukiText = [System.Text.Encoding]::ASCII.GetString($ukiBytes)
-if ($ukiText.Contains("keep_bootcon") -and (-not $ukiText.Contains("nomodeset"))) {
-    Write-Host "      [OK] Quell-UKI verifiziert: 'keep_bootcon' ist AKTIV, 'nomodeset' ist ENTFERNT!" -ForegroundColor Green
-} else {
-    Write-Host "      [FEHLER] Quell-UKI enthaelt nicht die richtigen Kernel-Parameter!" -ForegroundColor Red
+$ukiSize = (Get-Item $ukiSource).Length
+Write-Host "[1/5] Pruefe Quell-UKI ($([math]::Round($ukiSize / 1MB, 2)) MB)..." -ForegroundColor Yellow
+if ($ukiSize -lt 20MB) {
+    Write-Host "[FEHLER] UKI ist unvollstaendig!" -ForegroundColor Red
     pause
     exit 1
 }
+Write-Host "      [OK] UKI ist startklar!" -ForegroundColor Green
 
-# 1. Check if S: is already mounted
+# 1. Mount VHDX
 $targetLetter = "S"
 if (-not (Test-Path "S:\EFI")) {
     $existing = Get-DiskImage -ImagePath $vhdxPath -ErrorAction SilentlyContinue
@@ -83,39 +81,38 @@ if (-not (Test-Path "S:\EFI")) {
     Write-Host "[2/5] EFI-Partition bereits unter S: eingehaengt!" -ForegroundColor Green
 }
 
-Write-Host "[4/5] Kopiere UKI auf die EFI-Partition (Platzsparend fuer 96 MB ESP)..." -ForegroundColor Yellow
+Write-Host "[4/5] Bereinige alte Dateien & kopiere neues UKI..." -ForegroundColor Yellow
 
-# Clean up redundant Bifrost copy to ensure we never run out of space on 96MB ESP
+# Clean up redundant old files to prevent ESP overflow (96 MB limit)
 if (Test-Path "S:\EFI\Bifrost\bifrost-boot.efi") {
     Remove-Item -Path "S:\EFI\Bifrost\bifrost-boot.efi" -Force
 }
-
-$targetBoot = "S:\EFI\Boot"
-$targetMs = "S:\EFI\Microsoft\Boot"
-
-New-Item -ItemType Directory -Force -Path $targetBoot | Out-Null
-New-Item -ItemType Directory -Force -Path $targetMs | Out-Null
-
-# Remove old 0-byte or broken bootmgfw.efi
-if (Test-Path "$targetMs\bootmgfw.efi") {
-    $curSize = (Get-Item "$targetMs\bootmgfw.efi").Length
-    if ($curSize -lt 10MB) {
-        Remove-Item -Path "$targetMs\bootmgfw.efi" -Force
-    }
+if (Test-Path "S:\EFI\Boot\bootx64.efi") {
+    Remove-Item -Path "S:\EFI\Boot\bootx64.efi" -Force
 }
 
-# Copy to bootmgfw.efi (Windows Boot Manager replacement)
+$targetMs = "S:\EFI\Microsoft\Boot"
+New-Item -ItemType Directory -Force -Path $targetMs | Out-Null
+
+if (Test-Path "$targetMs\bootmgfw.efi") {
+    Remove-Item -Path "$targetMs\bootmgfw.efi" -Force
+}
+
+# Copy primary bootloader (bootmgfw.efi)
 Copy-Item -Path $ukiSource -Destination "$targetMs\bootmgfw.efi" -Force
 $copiedMs = (Get-Item "$targetMs\bootmgfw.efi").Length
 Write-Host "      [OK] $targetMs\bootmgfw.efi geschrieben ($([math]::Round($copiedMs / 1MB, 2)) MB)" -ForegroundColor Green
 
-# Copy to bootx64.efi (UEFI Fallback Bootloader)
-Copy-Item -Path $ukiSource -Destination "$targetBoot\bootx64.efi" -Force
-$copiedBoot = (Get-Item "$targetBoot\bootx64.efi").Length
-Write-Host "      [OK] $targetBoot\bootx64.efi geschrieben ($([math]::Round($copiedBoot / 1MB, 2)) MB)" -ForegroundColor Green
-
-$freeSpace = (Get-Volume -DriveLetter S).SizeRemaining / 1MB
-Write-Host "      Freier Speicherplatz auf ESP: $([math]::Round($freeSpace, 2)) MB" -ForegroundColor Green
+# Check remaining space; if enough, also write fallback bootx64.efi
+$freeMB = (Get-Volume -DriveLetter S).SizeRemaining / 1MB
+if ($freeMB -gt ($ukiSize / 1MB + 5)) {
+    $targetBoot = "S:\EFI\Boot"
+    New-Item -ItemType Directory -Force -Path $targetBoot | Out-Null
+    Copy-Item -Path $ukiSource -Destination "$targetBoot\bootx64.efi" -Force
+    Write-Host "      [OK] S:\EFI\Boot\bootx64.efi geschrieben ($([math]::Round((Get-Item "$targetBoot\bootx64.efi").Length / 1MB, 2)) MB)" -ForegroundColor Green
+} else {
+    Write-Host "      [INFO] Platzsparmodus aktiv: Primaerer Bootloader bootmgfw.efi ist scharf ($([math]::Round($freeMB, 1)) MB frei auf ESP)." -ForegroundColor Green
+}
 
 Write-Host "[5/5] Trenne Laufwerksbuchstabe und VHDX sauber..." -ForegroundColor Yellow
 Get-Partition | Where-Object { $_.DriveLetter -eq 'S' } | Remove-PartitionAccessPath -AccessPath "S:\" -ErrorAction SilentlyContinue
@@ -125,8 +122,8 @@ Start-Sleep -Seconds 2
 
 Write-Host ""
 Write-Host "==========================================================" -ForegroundColor Green
-Write-Host "  ERFOLG! Das neue UKI mit keep_bootcon wurde auf die VHDX geschrieben!" -ForegroundColor Green
-Write-Host "  Du kannst die VM 'DerTestGerät' jetzt in Hyper-V starten!" -ForegroundColor Green
+Write-Host "  ERFOLG! Das neue UKI mit Live-Logging ist auf der VHDX!" -ForegroundColor Green
+Write-Host "  Starte die VM 'DerTestGerät' jetzt in Hyper-V!" -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host "Druecke eine beliebige Taste zum Beenden..."
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")

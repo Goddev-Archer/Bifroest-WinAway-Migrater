@@ -70,6 +70,7 @@ if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
   for subdir in \
     kernel/drivers/hv \
     kernel/drivers/hid \
+    kernel/drivers/input \
     kernel/drivers/scsi \
     kernel/drivers/ata \
     kernel/drivers/nvme \
@@ -157,7 +158,7 @@ kmsg_log "=== Bifrost Linux RAMFS Migration Kernel ==="
 kmsg_log "============================================="
 kmsg_log "Lade Storage-, Hyper-V- und Dateisystem-Treiber..."
 
-for mod in hv_vmbus hyperv_drm hv_storvsc hv_utils hid hid_hyperv scsi_mod sd_mod nvme virtio_pci virtio_blk virtio_scsi btrfs vfat fat nls_cp437 nls_iso8859_1 fuse ntfs3; do
+for mod in hv_vmbus hyperv_keyboard hyperv_drm hv_storvsc hv_utils hid hid_hyperv atkbd serio evdev scsi_mod sd_mod nvme virtio_pci virtio_blk virtio_scsi btrfs vfat fat nls_cp437 nls_iso8859_1 fuse ntfs3; do
   modprobe "$mod" 2>/dev/null || true
 done
 
@@ -220,7 +221,7 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
   fi
 fi
 
-/bin/bifroest </dev/tty0 >/dev/tty0 2>&1 || true
+setsid cttyhack /bin/bifroest </dev/tty0 >/dev/tty0 2>&1 || /bin/bifroest </dev/tty0 >/dev/tty0 2>&1 || true
 exec setsid cttyhack /bin/sh 2>/dev/null || exec /bin/sh
 EOF
 
