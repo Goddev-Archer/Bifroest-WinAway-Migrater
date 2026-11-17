@@ -76,13 +76,8 @@ if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
     kernel/drivers/block \
     kernel/drivers/virtio \
     kernel/drivers/video \
-    kernel/drivers/gpu/drm/hyperv \
-    kernel/fs/btrfs \
-    kernel/fs/fat \
-    kernel/fs/nls \
-    kernel/fs/fuse \
-    kernel/fs/ext4 \
-    kernel/fs/ntfs3 \
+    kernel/drivers/gpu \
+    kernel/fs \
     kernel/crypto \
     kernel/lib; do
     if [ -d "$MOD_SRC/$subdir" ]; then
@@ -145,19 +140,24 @@ mkdir -p /dev/pts /run /tmp /mnt/win_src /mnt/target_linux
 mount -t tmpfs none /run || true
 mount -t tmpfs none /tmp || true
 
+# Dual logging to both stdout/console AND /dev/kmsg (guaranteed display on earlycon=efifb)
+kmsg_log() {
+  echo "<6>[Bifrost] $1" > /dev/kmsg 2>/dev/null || true
+  echo "[Bifrost] $1"
+}
+
 if [ -c /dev/tty0 ]; then
   exec </dev/tty0 >/dev/tty0 2>&1
 elif [ -c /dev/console ]; then
   exec </dev/console >/dev/console 2>&1
 fi
 
-echo ""
-echo "============================================="
-echo "=== Bifrost Linux RAMFS Migration Kernel ==="
-echo "============================================="
-echo "[Init] Lade Storage-, Hyper-V- und Dateisystem-Treiber..."
+kmsg_log "============================================="
+kmsg_log "=== Bifrost Linux RAMFS Migration Kernel ==="
+kmsg_log "============================================="
+kmsg_log "Lade Storage-, Hyper-V- und Dateisystem-Treiber..."
 
-for mod in hv_vmbus hyperv_fb hyperv_drm fbdev hv_storvsc hv_utils hid hid_hyperv scsi_mod sd_mod nvme virtio_pci virtio_blk virtio_scsi btrfs vfat fat nls_cp437 nls_iso8859_1 fuse ntfs3 ext4; do
+for mod in hv_vmbus hyperv_drm hv_storvsc hv_utils hid hid_hyperv scsi_mod sd_mod nvme virtio_pci virtio_blk virtio_scsi btrfs vfat fat nls_cp437 nls_iso8859_1 fuse ntfs3; do
   modprobe "$mod" 2>/dev/null || true
 done
 
@@ -166,17 +166,22 @@ sleep 2
 mdev -s 2>/dev/null || true
 
 if grep -q "bifrost_auto=1" /proc/cmdline; then
-  echo "[Init] Suche bifrost_blackbox.tar.zst auf lokalen Partitionen..."
+  kmsg_log "Suche bifrost_blackbox.tar.zst auf lokalen Partitionen..."
   ARCHIVE_RAM="/tmp/bifrost_blackbox.tar.zst"
   WIN_PART=""
 
   for part in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* /dev/nvme[0-9]n[0-9]p[0-9]*; do
     [ -b "$part" ] || continue
-    if ntfs-3g -o ro "$part" /mnt/win_src 2>/dev/null || mount -o ro "$part" /mnt/win_src 2>/dev/null; then
-      FOUND=$(find /mnt/win_src/Users -maxdepth 3 -name bifrost_blackbox.tar.zst 2>/dev/null | head -n 1 || true)
+    kmsg_log "Prüfe Partition $part..."
+
+    # Reset any NTFS dirty or hibernation flags so ntfs-3g mounts cleanly
+    ntfsfix -d "$part" >/dev/null 2>&1 || true
+
+    if ntfs-3g -o ro "$part" /mnt/win_src 2>/dev/null || mount -t ntfs3 -o ro "$part" /mnt/win_src 2>/dev/null || mount -o ro "$part" /mnt/win_src 2>/dev/null; then
+      FOUND=$(find /mnt/win_src -name "bifrost_blackbox.tar.zst" 2>/dev/null | head -n 1 || true)
       if [ -n "$FOUND" ]; then
-        echo "[Init] Blackbox gefunden auf $part: $FOUND"
-        echo "[Init] Kopiere Blackbox in den RAM ($ARCHIVE_RAM)..."
+        kmsg_log "Blackbox gefunden auf $part: $FOUND"
+        kmsg_log "Kopiere Blackbox in den RAM ($ARCHIVE_RAM)..."
         cp "$FOUND" "$ARCHIVE_RAM"
         WIN_PART="$part"
         umount /mnt/win_src || true
@@ -187,26 +192,31 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
   done
 
   if [ -n "$WIN_PART" ] && [ -f "$ARCHIVE_RAM" ]; then
-    echo "[Init] Bereinige NTFS Dirty-Flag auf $WIN_PART vor Shrink..."
-    ntfsfix -d "$WIN_PART" 2>/dev/null || true
+    kmsg_log "Bereinige NTFS Dirty-Flag auf $WIN_PART vor Shrink..."
+    ntfsfix -d "$WIN_PART" >/dev/null 2>&1 || true
 
-    echo "[Init] Starte Bifröst RAMFS Bridge Engine..."
-    if /bin/bifroest --ramfs --archive "$ARCHIVE_RAM" --target-root /mnt/target_linux; then
-      echo "[Init] Synchronisiere Basis-Runtime in @root (/mnt/target_linux)..."
+    kmsg_log "Starte Bifröst RAMFS Bridge Engine..."
+    # Stream every output line of bifroest directly to /dev/kmsg so user sees 100% progress!
+    if /bin/bifroest --ramfs --archive "$ARCHIVE_RAM" --target-root /mnt/target_linux 2>&1 | while IFS= read -r line; do
+      echo "<6>[Bifrost] $line" > /dev/kmsg 2>/dev/null || true
+      echo "$line"
+    done; then
+      kmsg_log "=== Bifrost Migration erfolgreich abgeschlossen! ==="
+      kmsg_log "Synchronisiere Basis-Runtime in @root (/mnt/target_linux)..."
       mkdir -p /mnt/target_linux/bin /mnt/target_linux/sbin /mnt/target_linux/lib /mnt/target_linux/usr /mnt/target_linux/proc /mnt/target_linux/sys /mnt/target_linux/dev /mnt/target_linux/tmp /mnt/target_linux/run
       cp -a /bin/. /mnt/target_linux/bin/ 2>/dev/null || true
       cp -a /sbin/. /mnt/target_linux/sbin/ 2>/dev/null || true
       cp -a /lib/. /mnt/target_linux/lib/ 2>/dev/null || true
-      echo "=== Bifrost Migration abgeschlossen ==="
-      echo "Öffne Verifikations-Shell im RAMFS (tippe 'reboot -f' zum Neustart)."
-      exec setsid cttyhack /bin/sh 2>/dev/null || exec /bin/sh
+      kmsg_log "=== Migration abgeschlossen! Neustart in 5 Sekunden... ==="
+      sleep 5
+      reboot -f 2>/dev/null || sync && reboot -f
     else
-      echo "[ERROR] Bifröst RAMFS Engine meldete einen Fehler!"
+      kmsg_log "[ERROR] Bifröst RAMFS Engine meldete einen Fehler!"
       exec setsid cttyhack /bin/sh 2>/dev/null || exec /bin/sh
     fi
   else
-    echo "[WARN] Keine bifrost_blackbox.tar.zst auf lokalen Partitionen gefunden."
-    echo "[Init] Starte interaktive Bifröst TUI..."
+    kmsg_log "[WARN] Keine bifrost_blackbox.tar.zst auf lokalen Partitionen gefunden."
+    kmsg_log "[Init] Starte interaktive Bifröst TUI..."
   fi
 fi
 
