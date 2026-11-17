@@ -1,16 +1,16 @@
 #!/bin/sh
 set -e
 
-VMLINUZ="${1:-vmlinuz-lts}"
+VMLINUZ="${1:-vmlinuz-virt}"
 INITRD="${2:-initramfs-bifrost.cpio.gz}"
 OUT_EFI="${3:-bifrost-boot.efi}"
 CMDLINE="bifrost_auto=1 console=tty0 earlycon=efifb keep_bootcon loglevel=7 panic=10"
 
 if [ ! -f "$VMLINUZ" ]; then
-  if [ -f /boot/vmlinuz-lts ]; then
-    VMLINUZ="/boot/vmlinuz-lts"
-  elif [ -f /boot/vmlinuz-virt ]; then
+  if [ -f /boot/vmlinuz-virt ]; then
     VMLINUZ="/boot/vmlinuz-virt"
+  elif [ -f /boot/vmlinuz-lts ]; then
+    VMLINUZ="/boot/vmlinuz-lts"
   else
     echo "[ERROR] Kernel nicht gefunden: $VMLINUZ"
     exit 1

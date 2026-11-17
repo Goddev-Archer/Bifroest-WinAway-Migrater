@@ -60,36 +60,13 @@ if [ -f /lib/ld-musl-x86_64.so.1 ] && [ ! -f "$WORK_DIR/lib/ld-musl-x86_64.so.1"
 fi
 
 # Kernel-Module für Hyper-V Gen 2, VirtIO, NVMe, SCSI und Dateisysteme mitnehmen
-KVER="$(ls -1 /lib/modules 2>/dev/null | head -n 1 || true)"
+KVER="$(ls -1 /lib/modules 2>/dev/null | grep -E 'virt|lts' | head -n 1 || ls -1 /lib/modules 2>/dev/null | head -n 1 || true)"
 if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
   echo "[Bifrost] Kopiere Kernel-Module für $KVER..."
   MOD_SRC="/lib/modules/$KVER"
   MOD_DST="$WORK_DIR/lib/modules/$KVER"
   mkdir -p "$MOD_DST"
-
-  for subdir in \
-    kernel/drivers/hv \
-    kernel/drivers/hid \
-    kernel/drivers/input \
-    kernel/drivers/scsi \
-    kernel/drivers/ata \
-    kernel/drivers/nvme \
-    kernel/drivers/block \
-    kernel/drivers/virtio \
-    kernel/drivers/video \
-    kernel/drivers/gpu \
-    kernel/fs \
-    kernel/crypto \
-    kernel/lib; do
-    if [ -d "$MOD_SRC/$subdir" ]; then
-      mkdir -p "$MOD_DST/$(dirname "$subdir")"
-      cp -a "$MOD_SRC/$subdir" "$MOD_DST/$(dirname "$subdir")/"
-    fi
-  done
-
-  for meta in modules.order modules.builtin modules.builtin.modinfo; do
-    [ -f "$MOD_SRC/$meta" ] && cp "$MOD_SRC/$meta" "$MOD_DST/"
-  done
+  cp -a "$MOD_SRC"/. "$MOD_DST/"
 
   if command -v depmod >/dev/null 2>&1; then
     depmod -b "$WORK_DIR" "$KVER" || true
@@ -192,7 +169,10 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
     # Reset any NTFS dirty or hibernation flags so ntfs-3g mounts cleanly
     ntfsfix -b -d "$part" >/dev/null 2>&1 || true
 
-    if ntfs-3g -o ro,force,remove_hiberfile "$part" /mnt/win_src 2>/dev/null || mount -t ntfs3 -o ro,force "$part" /mnt/win_src 2>/dev/null || mount -o ro "$part" /mnt/win_src 2>/dev/null; then
+    if ntfs-3g -o ro "$part" /mnt/win_src 2>/dev/null || \
+       ntfs-3g -o remove_hiberfile "$part" /mnt/win_src 2>/dev/null || \
+       mount -t ntfs3 -o ro "$part" /mnt/win_src 2>/dev/null || \
+       mount -o ro "$part" /mnt/win_src 2>/dev/null; then
       FOUND=$(find /mnt/win_src -iname "bifrost_blackbox.tar.zst" 2>/dev/null | head -n 1 || true)
       if [ -n "$FOUND" ]; then
         kmsg_log "Blackbox gefunden auf $part: $FOUND"

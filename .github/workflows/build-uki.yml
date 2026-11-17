@@ -63,12 +63,12 @@ jobs:
           RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo build --release --target x86_64-unknown-linux-musl
 
-      - name: Build Initramfs & extract Alpine LTS Kernel
+      - name: Build Initramfs & extract Alpine Virt Kernel
         run: |
           docker run --rm -v "${{ github.workspace }}:/work" -w /work alpine:3.20 sh -c '
             set -e
             apk add --no-cache \
-              linux-lts \
+              linux-virt \
               busybox-static \
               kmod \
               ntfs-3g \
@@ -80,7 +80,7 @@ jobs:
               e2fsprogs \
               cpio \
               gzip
-            cp /boot/vmlinuz-lts /work/vmlinuz-lts
+            cp /boot/vmlinuz-virt /work/vmlinuz-virt
             sed -i "s/\r$//" /work/tools/make_initramfs.sh
             sh /work/tools/make_initramfs.sh /work/initramfs-bifrost.cpio.gz
           '
@@ -89,7 +89,7 @@ jobs:
         run: |
           sudo apt-get install -y systemd-ukify systemd-boot-efi binutils
           sed -i 's/\r$//' tools/build_uki.sh
-          sh tools/build_uki.sh vmlinuz-lts initramfs-bifrost.cpio.gz bifrost-boot.efi
+          sh tools/build_uki.sh vmlinuz-virt initramfs-bifrost.cpio.gz bifrost-boot.efi
           ls -lh bifrost-boot.efi
 
       - name: Upload bifrost-boot.efi artifact

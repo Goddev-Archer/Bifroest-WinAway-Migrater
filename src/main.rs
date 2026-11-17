@@ -406,39 +406,80 @@ fn auto_discover_blackbox() -> io::Result<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        let devices = bridge::partition::discover_block_devices();
         let mount_dir = Path::new("/mnt/win_src");
         let _ = std::fs::create_dir_all(mount_dir);
 
-        for dev in &devices {
-            for part in &dev.partitions {
-                let part_str = part.dev_path.to_string_lossy();
-                let _ = std::process::Command::new("ntfsfix")
-                    .args(["-b", "-d", &part_str])
-                    .status();
-
-                let mount_res = std::process::Command::new("ntfs-3g")
-                    .args(["-o", "ro,force,remove_hiberfile", &part_str, "/mnt/win_src"])
-                    .status();
-
-                let mounted = mount_res.map(|s| s.success()).unwrap_or(false);
-                if !mounted {
-                    let _ = std::process::Command::new("mount")
-                        .args(["-t", "ntfs3", "-o", "ro,force", &part_str, "/mnt/win_src"])
-                        .status();
+        // Gather all partition candidates from sysfs and /dev
+        let mut part_candidates: Vec<PathBuf> = Vec::new();
+        for dev in bridge::partition::discover_linux_block_devices() {
+            for part in dev.partitions {
+                if !part_candidates.contains(&part.dev_path) {
+                    part_candidates.push(part.dev_path);
                 }
-
-                if mount_dir.exists() {
-                    for entry in walkdir::WalkDir::new(mount_dir).max_depth(8).into_iter().flatten() {
-                        if entry.file_name().to_string_lossy().eq_ignore_ascii_case("bifrost_blackbox.tar.zst") {
-                            println!("[Bifröst Auto-Discovery] Blackbox gefunden: {}", entry.path().display());
-                            std::fs::copy(entry.path(), &tmp_dest)?;
-                            let _ = std::process::Command::new("umount").arg("/mnt/win_src").status();
-                            return Ok(tmp_dest);
-                        }
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir("/dev") {
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if (fname.starts_with("sd") || fname.starts_with("vd") || fname.starts_with("nvme"))
+                    && fname.chars().last().map(|c| c.is_ascii_digit()).unwrap_or(false)
+                {
+                    let p = entry.path();
+                    if !part_candidates.contains(&p) {
+                        part_candidates.push(p);
                     }
-                    let _ = std::process::Command::new("umount").arg("/mnt/win_src").status();
                 }
+            }
+        }
+
+        println!("[Bifröst Auto-Discovery] Gefundene Partitionen: {:?}", part_candidates);
+
+        for part in &part_candidates {
+            let part_str = part.to_string_lossy();
+            let _ = std::process::Command::new("ntfsfix")
+                .args(["-b", "-d", &part_str])
+                .status();
+
+            // Try read-only ntfs-3g mount first
+            let mut mounted = std::process::Command::new("ntfs-3g")
+                .args(["-o", "ro", &part_str, "/mnt/win_src"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if !mounted {
+                // If hibernated, try remove_hiberfile (without ro)
+                mounted = std::process::Command::new("ntfs-3g")
+                    .args(["-o", "remove_hiberfile", &part_str, "/mnt/win_src"])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+            }
+
+            if !mounted {
+                // Fall back to kernel ntfs3 or standard mount
+                mounted = std::process::Command::new("mount")
+                    .args(["-t", "ntfs3", "-o", "ro", &part_str, "/mnt/win_src"])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+                    || std::process::Command::new("mount")
+                        .args(["-o", "ro", &part_str, "/mnt/win_src"])
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+            }
+
+            if mounted && mount_dir.exists() {
+                for entry in walkdir::WalkDir::new(mount_dir).max_depth(8).into_iter().flatten() {
+                    if entry.file_name().to_string_lossy().eq_ignore_ascii_case("bifrost_blackbox.tar.zst") {
+                        println!("[Bifröst Auto-Discovery] Blackbox gefunden: {}", entry.path().display());
+                        std::fs::copy(entry.path(), &tmp_dest)?;
+                        let _ = std::process::Command::new("umount").arg("/mnt/win_src").status();
+                        return Ok(tmp_dest);
+                    }
+                }
+                let _ = std::process::Command::new("umount").arg("/mnt/win_src").status();
             }
         }
     }

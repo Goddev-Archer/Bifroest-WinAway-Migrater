@@ -153,7 +153,7 @@ fn build_vm_fallback_device() -> BlockDevice {
 }
 
 #[cfg(target_os = "linux")]
-fn discover_linux_block_devices() -> Vec<BlockDevice> {
+pub fn discover_linux_block_devices() -> Vec<BlockDevice> {
     let mut devices = Vec::new();
     let Ok(entries) = fs::read_dir("/sys/block") else {
         return devices;
