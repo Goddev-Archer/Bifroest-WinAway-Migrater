@@ -356,31 +356,40 @@ fn main() -> io::Result<()> {
         return run_ramfs_cli(&args);
     }
 
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic_info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        original_hook(panic_info);
-    }));
-
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let mut app = App::new();
-    let res = run_app(&mut terminal, &mut app);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    if let Err(err) = res {
-        eprintln!("Bifröst Error: {err}");
+    #[cfg(target_os = "linux")]
+    {
+        // On Linux / RAMFS: NEVER run the Windows wizard! Always run the Transit Engine.
+        return run_ramfs_cli(&args);
     }
 
-    Ok(())
+    #[cfg(target_os = "windows")]
+    {
+        let original_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            original_hook(panic_info);
+        }));
+
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        let mut app = App::new();
+        let res = run_app(&mut terminal, &mut app);
+
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        terminal.show_cursor()?;
+
+        if let Err(err) = res {
+            eprintln!("Bifröst Error: {err}");
+        }
+
+        Ok(())
+    }
 }
 
 fn find_arg_value(args: &[String], flag: &str) -> Option<String> {
@@ -389,20 +398,70 @@ fn find_arg_value(args: &[String], flag: &str) -> Option<String> {
         .map(|w| w[1].clone())
 }
 
+fn auto_discover_blackbox() -> io::Result<PathBuf> {
+    let tmp_dest = PathBuf::from("/tmp/bifrost_blackbox.tar.zst");
+    if tmp_dest.exists() {
+        return Ok(tmp_dest);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let devices = bridge::partition::discover_block_devices();
+        let mount_dir = Path::new("/mnt/win_src");
+        let _ = std::fs::create_dir_all(mount_dir);
+
+        for dev in &devices {
+            for part in &dev.partitions {
+                let part_str = part.dev_path.to_string_lossy();
+                let _ = std::process::Command::new("ntfsfix")
+                    .args(["-b", "-d", &part_str])
+                    .status();
+
+                let mount_res = std::process::Command::new("ntfs-3g")
+                    .args(["-o", "ro,force,remove_hiberfile", &part_str, "/mnt/win_src"])
+                    .status();
+
+                let mounted = mount_res.map(|s| s.success()).unwrap_or(false);
+                if !mounted {
+                    let _ = std::process::Command::new("mount")
+                        .args(["-t", "ntfs3", "-o", "ro,force", &part_str, "/mnt/win_src"])
+                        .status();
+                }
+
+                if mount_dir.exists() {
+                    for entry in walkdir::WalkDir::new(mount_dir).max_depth(8).into_iter().flatten() {
+                        if entry.file_name().to_string_lossy().eq_ignore_ascii_case("bifrost_blackbox.tar.zst") {
+                            println!("[Bifröst Auto-Discovery] Blackbox gefunden: {}", entry.path().display());
+                            std::fs::copy(entry.path(), &tmp_dest)?;
+                            let _ = std::process::Command::new("umount").arg("/mnt/win_src").status();
+                            return Ok(tmp_dest);
+                        }
+                    }
+                    let _ = std::process::Command::new("umount").arg("/mnt/win_src").status();
+                }
+            }
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "Keine bifrost_blackbox.tar.zst auf lokalen Partitionen gefunden.",
+    ))
+}
+
 fn run_ramfs_cli(args: &[String]) -> io::Result<()> {
-    let archive_str = find_arg_value(args, "--archive").ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--archive <pfad> wird im --ramfs Modus benötigt.",
-        )
-    })?;
+    let archive_path = if let Some(p) = find_arg_value(args, "--archive") {
+        PathBuf::from(p)
+    } else {
+        auto_discover_blackbox()?
+    };
     let target_str =
         find_arg_value(args, "--target-root").unwrap_or_else(|| "/mnt/target_linux".to_string());
     let expected_sha256 = find_arg_value(args, "--sha256");
     let dry_run = args.iter().any(|a| a == "--dry-run");
 
     let summary = bridge::ramfs_cinema::run_ramfs_transit_cinema(
-        Path::new(&archive_str),
+        &archive_path,
         expected_sha256.as_deref(),
         Path::new(&target_str),
         32 * 1024 * 1024 * 1024,

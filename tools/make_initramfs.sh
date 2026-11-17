@@ -141,6 +141,10 @@ mount -t devtmpfs none /dev || true
 mkdir -p /dev/pts /run /tmp /mnt/win_src /mnt/target_linux
 mount -t tmpfs none /run || true
 mount -t tmpfs none /tmp || true
+echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
+
+# ACPI & Signal Handler für sauberes Herunterfahren/Neustarten aus Hyper-V
+trap 'poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger' PWR INT TERM HUP
 
 # Dual logging to both stdout/console AND /dev/kmsg (guaranteed display on earlycon=efifb)
 kmsg_log() {
@@ -186,10 +190,10 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
     kmsg_log "Prüfe Partition $part..."
 
     # Reset any NTFS dirty or hibernation flags so ntfs-3g mounts cleanly
-    ntfsfix -d "$part" >/dev/null 2>&1 || true
+    ntfsfix -b -d "$part" >/dev/null 2>&1 || true
 
-    if ntfs-3g -o ro "$part" /mnt/win_src 2>/dev/null || mount -t ntfs3 -o ro "$part" /mnt/win_src 2>/dev/null || mount -o ro "$part" /mnt/win_src 2>/dev/null; then
-      FOUND=$(find /mnt/win_src -name "bifrost_blackbox.tar.zst" 2>/dev/null | head -n 1 || true)
+    if ntfs-3g -o ro,force,remove_hiberfile "$part" /mnt/win_src 2>/dev/null || mount -t ntfs3 -o ro,force "$part" /mnt/win_src 2>/dev/null || mount -o ro "$part" /mnt/win_src 2>/dev/null; then
+      FOUND=$(find /mnt/win_src -iname "bifrost_blackbox.tar.zst" 2>/dev/null | head -n 1 || true)
       if [ -n "$FOUND" ]; then
         kmsg_log "Blackbox gefunden auf $part: $FOUND"
         kmsg_log "Kopiere Blackbox in den RAM ($ARCHIVE_RAM)..."
@@ -204,7 +208,7 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
 
   if [ -n "$WIN_PART" ] && [ -f "$ARCHIVE_RAM" ]; then
     kmsg_log "Bereinige NTFS Dirty-Flag auf $WIN_PART vor Shrink..."
-    ntfsfix -d "$WIN_PART" >/dev/null 2>&1 || true
+    ntfsfix -b -d "$WIN_PART" >/dev/null 2>&1 || true
 
     kmsg_log "Starte Bifröst RAMFS Transit Cinema Engine..."
     if setsid cttyhack /bin/bifroest --ramfs --archive "$ARCHIVE_RAM" --target-root /mnt/target_linux </dev/tty0 >/dev/tty0 2>&1 || /bin/bifroest --ramfs --archive "$ARCHIVE_RAM" --target-root /mnt/target_linux; then
@@ -216,19 +220,24 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
       cp -a /lib/. /mnt/target_linux/lib/ 2>/dev/null || true
       kmsg_log "=== Migration abgeschlossen! Neustart in 5 Sekunden... ==="
       sleep 5
-      reboot -f 2>/dev/null || sync && reboot -f
+      reboot -f 2>/dev/null || (echo b > /proc/sysrq-trigger 2>/dev/null) || sync
     else
       kmsg_log "[ERROR] Bifröst RAMFS Engine meldete einen Fehler!"
-      exec setsid cttyhack /bin/sh 2>/dev/null || exec /bin/sh
     fi
   else
-    kmsg_log "[WARN] Keine bifrost_blackbox.tar.zst auf lokalen Partitionen gefunden."
-    kmsg_log "[Init] Starte interaktive Bifröst TUI..."
+    kmsg_log "[WARN] Starte interne Bifröst Auto-Discovery..."
+    setsid cttyhack /bin/bifroest --ramfs --target-root /mnt/target_linux </dev/tty0 >/dev/tty0 2>&1 || /bin/bifroest --ramfs --target-root /mnt/target_linux || true
   fi
 fi
 
-setsid cttyhack /bin/bifroest </dev/tty0 >/dev/tty0 2>&1 || /bin/bifroest </dev/tty0 >/dev/tty0 2>&1 || true
-exec setsid cttyhack /bin/sh 2>/dev/null || exec /bin/sh
+kmsg_log "Bifröst RAMFS Durchlauf beendet. Automatischer Neustart..."
+sleep 3
+reboot -f 2>/dev/null || (echo b > /proc/sysrq-trigger 2>/dev/null) || sync
+
+# Safety loop: PID 1 must NEVER exit and NEVER panic!
+while true; do
+  reboot -f 2>/dev/null || (echo b > /proc/sysrq-trigger 2>/dev/null) || sleep 60
+done
 EOF
 
 chmod +x "$WORK_DIR/init" "$WORK_DIR/bin/bifroest"

@@ -4,7 +4,7 @@ set -e
 VMLINUZ="${1:-vmlinuz-lts}"
 INITRD="${2:-initramfs-bifrost.cpio.gz}"
 OUT_EFI="${3:-bifrost-boot.efi}"
-CMDLINE="bifrost_auto=1 console=tty0 earlycon=efifb keep_bootcon loglevel=7"
+CMDLINE="bifrost_auto=1 console=tty0 earlycon=efifb keep_bootcon loglevel=7 panic=10"
 
 if [ ! -f "$VMLINUZ" ]; then
   if [ -f /boot/vmlinuz-lts ]; then
