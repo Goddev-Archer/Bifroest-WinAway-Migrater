@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(plan.ntfs_shrunk_bytes, 50 * GIB);
         assert_eq!(plan.linux_start_sector % sectors_per_mib, 0);
         assert_eq!(plan.linux_target_bytes, 40 * GIB);
-        assert!(plan.commands_to_run[0].contains("ntfsresize --force --no-action"));
+        assert!(plan.commands_to_run[0].contains("ntfsresize --force --force"));
     }
 
     #[test]

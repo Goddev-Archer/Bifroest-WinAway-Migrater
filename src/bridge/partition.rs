@@ -368,7 +368,6 @@ pub fn calculate_shrink_plan(
     let win_str = ntfs_part.dev_path.to_string_lossy();
 
     let commands_to_run = vec![
-        format!("ntfsresize --force --no-action --size {ntfs_shrunk_bytes} {win_str}"),
         format!("yes | ntfsresize --force --force --no-progress-bar --size {ntfs_shrunk_bytes} {win_str}"),
         format!(
             "printf 'Yes\\n' | parted ---pretend-input-tty {disk_str} resizepart {} {win_end_mib}MiB",

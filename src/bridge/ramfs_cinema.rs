@@ -444,6 +444,27 @@ fn render_bottom_status(f: &mut Frame, area: Rect, st: &TransitStatus) {
             .border_type(BorderType::Double)
             .title(Span::styled(" ⚠ PIPELINE ERROR - DETAILS ⚠ ", Style::default().fg(C_MIDGARD).add_modifier(Modifier::BOLD)));
 
+        // Sanitize control characters (\r from progress bars) and collapse multiple lines
+        let clean_err: String = err
+            .lines()
+            .map(|line| {
+                // Take the last segment after any \r carriage return
+                line.split('\r')
+                    .filter_map(|seg| {
+                        let trimmed = seg.trim();
+                        if !trimmed.is_empty() {
+                            Some(trimmed)
+                        } else {
+                            None
+                        }
+                    })
+                    .last()
+                    .unwrap_or("")
+            })
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ↵ ");
+
         let lines = vec![
             Line::from(vec![
                 Span::styled(" Action: ", Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
@@ -451,7 +472,7 @@ fn render_bottom_status(f: &mut Frame, area: Rect, st: &TransitStatus) {
             ]),
             Line::from(vec![
                 Span::styled(" Details: ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
-                Span::styled(err.replace('\n', " ↵ "), Style::default().fg(C_TEXT)),
+                Span::styled(clean_err, Style::default().fg(C_TEXT)),
             ]),
         ];
         let p = Paragraph::new(lines).block(err_block).wrap(ratatui::widgets::Wrap { trim: true });
