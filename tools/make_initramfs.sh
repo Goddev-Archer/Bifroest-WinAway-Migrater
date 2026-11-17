@@ -190,8 +190,13 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
     kmsg_log "Bereinige NTFS Dirty-Flag auf $WIN_PART vor Shrink..."
     ntfsfix -b -d "$WIN_PART" >/dev/null 2>&1 || true
 
+    # Mute console printk so kernel logs don't overwrite ratatui TUI
+    echo "1 1 1 1" > /proc/sys/kernel/printk 2>/dev/null || true
+    clear 2>/dev/null || true
+
     kmsg_log "Starte Bifröst RAMFS Transit Cinema Engine..."
-    if setsid cttyhack /bin/bifroest --ramfs --archive "$ARCHIVE_RAM" --target-root /mnt/target_linux </dev/tty0 >/dev/tty0 2>&1 || /bin/bifroest --ramfs --archive "$ARCHIVE_RAM" --target-root /mnt/target_linux; then
+    if /bin/bifroest --ramfs --archive "$ARCHIVE_RAM" --target-root /mnt/target_linux </dev/tty0 >/dev/tty0 2>&1 || /bin/bifroest --ramfs --archive "$ARCHIVE_RAM" --target-root /mnt/target_linux; then
+      echo "7 7 1 7" > /proc/sys/kernel/printk 2>/dev/null || true
       kmsg_log "=== Bifrost Migration erfolgreich abgeschlossen! ==="
       kmsg_log "Synchronisiere Basis-Runtime in @root (/mnt/target_linux)..."
       mkdir -p /mnt/target_linux/bin /mnt/target_linux/sbin /mnt/target_linux/lib /mnt/target_linux/usr /mnt/target_linux/proc /mnt/target_linux/sys /mnt/target_linux/dev /mnt/target_linux/tmp /mnt/target_linux/run
@@ -202,11 +207,15 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
       sleep 5
       reboot -f 2>/dev/null || (echo b > /proc/sysrq-trigger 2>/dev/null) || sync
     else
+      echo "7 7 1 7" > /proc/sys/kernel/printk 2>/dev/null || true
       kmsg_log "[ERROR] Bifröst RAMFS Engine meldete einen Fehler!"
     fi
   else
+    echo "1 1 1 1" > /proc/sys/kernel/printk 2>/dev/null || true
+    clear 2>/dev/null || true
     kmsg_log "[WARN] Starte interne Bifröst Auto-Discovery..."
-    setsid cttyhack /bin/bifroest --ramfs --target-root /mnt/target_linux </dev/tty0 >/dev/tty0 2>&1 || /bin/bifroest --ramfs --target-root /mnt/target_linux || true
+    /bin/bifroest --ramfs --target-root /mnt/target_linux </dev/tty0 >/dev/tty0 2>&1 || /bin/bifroest --ramfs --target-root /mnt/target_linux || true
+    echo "7 7 1 7" > /proc/sys/kernel/printk 2>/dev/null || true
   fi
 fi
 

@@ -368,7 +368,7 @@ pub fn calculate_shrink_plan(
     let win_str = ntfs_part.dev_path.to_string_lossy();
 
     let commands_to_run = vec![
-        format!("ntfsresize --no-action --size {ntfs_shrunk_bytes} {win_str}"),
+        format!("ntfsresize --force --no-action --size {ntfs_shrunk_bytes} {win_str}"),
         format!("yes | ntfsresize --force --force --no-progress-bar --size {ntfs_shrunk_bytes} {win_str}"),
         format!(
             "parted ---pretend-input-tty -s {disk_str} resizepart {} {win_end_mib}MiB Yes",
@@ -427,13 +427,44 @@ where
             let output = Command::new("sh").args(["-c", cmd]).output()?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
-                    format!("Partitionsbefehl fehlgeschlagen ({cmd}): {stderr}"),
+                    format!("Partitioning command failed ({cmd}):\nStdout: {stdout}\nStderr: {stderr}"),
                 ));
             }
         }
     }
 
     Ok(())
+}
+
+/// Queries ntfsresize --info --force to discover the absolute minimum safe partition size for an NTFS volume.
+pub fn query_ntfs_minimum_size(part_dev: &Path) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let out = Command::new("ntfsresize")
+            .args(["--info", "--force", &part_dev.to_string_lossy()])
+            .output()
+            .ok()?;
+        let text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        for line in text.lines() {
+            if line.contains("might resize at") || line.contains("minimum size") {
+                let tokens: Vec<&str> = line.split_whitespace().collect();
+                for (idx, w) in tokens.iter().enumerate() {
+                    if idx + 1 < tokens.len() && tokens[idx + 1].eq_ignore_ascii_case("bytes") {
+                        if let Ok(bytes) = w.replace(',', "").parse::<u64>() {
+                            return Some(bytes);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = part_dev;
+    None
 }

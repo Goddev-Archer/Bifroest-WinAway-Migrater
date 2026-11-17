@@ -54,12 +54,13 @@ where
         .or_else(|| discover_block_devices().into_iter().next())
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Kein Ziel-Laufwerk gefunden"))?;
 
-    let ntfs_max = disk
+    let ntfs_part_opt = disk
         .partitions
         .iter()
         .find(|p| p.fs_type.eq_ignore_ascii_case("ntfs"))
-        .map(|p| p.size_bytes)
-        .unwrap_or(disk.total_bytes);
+        .or_else(|| disk.partitions.iter().max_by_key(|p| p.size_bytes));
+
+    let ntfs_max = ntfs_part_opt.map(|p| p.size_bytes).unwrap_or(disk.total_bytes);
 
     let target_req = if requested_linux_bytes > 0 {
         requested_linux_bytes
@@ -67,12 +68,23 @@ where
         32 * GIB
     };
 
-    // Safely clamp requested Linux partition size and minimum remaining NTFS space for smaller VM disks
-    let min_ntfs_remaining = if ntfs_max > 24 * GIB {
+    let min_needed_by_files = if let Some(ntfs_part) = ntfs_part_opt {
+        crate::bridge::partition::query_ntfs_minimum_size(&ntfs_part.dev_path)
+    } else {
+        None
+    };
+
+    // Safely clamp requested Linux partition size and minimum remaining NTFS space
+    let min_ntfs_remaining = if let Some(needed) = min_needed_by_files {
+        // Keep actual files + 512 MiB safety buffer, leaving at least 4 GiB for Linux if possible
+        (needed + 512 * MIB).max(12 * GIB).min(ntfs_max.saturating_sub(4 * GIB))
+    } else if ntfs_max > 24 * GIB {
         8 * GIB
     } else {
-        ntfs_max / 3
+        // For small VM disks (~20 GB), keep at least 12-14 GB for Windows files
+        (ntfs_max * 6 / 10).max(12 * GIB).min(ntfs_max.saturating_sub(4 * GIB))
     };
+
     let max_allocatable = ntfs_max.saturating_sub(min_ntfs_remaining + 64 * MIB);
     let effective_linux_bytes = target_req.min(max_allocatable).max(MIB);
 
@@ -207,7 +219,7 @@ mod tests {
         assert_eq!(plan.ntfs_shrunk_bytes, 50 * GIB);
         assert_eq!(plan.linux_start_sector % sectors_per_mib, 0);
         assert_eq!(plan.linux_target_bytes, 40 * GIB);
-        assert!(plan.commands_to_run[0].contains("ntfsresize --no-action"));
+        assert!(plan.commands_to_run[0].contains("ntfsresize --force --no-action"));
     }
 
     #[test]

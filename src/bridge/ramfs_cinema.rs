@@ -51,7 +51,7 @@ impl Default for TransitStatus {
             step: 1,
             total_steps: 5,
             percent: 0,
-            status_text: "Initialisiere Bifröst Transit Engine...".to_string(),
+            status_text: "Initializing Bifröst Transit Engine...".to_string(),
             finished: false,
             error: None,
             summary: None,
@@ -69,7 +69,7 @@ pub fn run_ramfs_transit_cinema(
 ) -> io::Result<BridgeExecutionSummary> {
     // If not a TTY (piped/testing), fall back to CLI logging
     if !std::io::IsTerminal::is_terminal(&io::stdout()) {
-        println!("[Bifröst RAMFS] Non-interactive TTY - starte direkten CLI-Modus...");
+        println!("[Bifröst RAMFS] Non-interactive TTY - launching direct CLI mode...");
         return execute_full_bridge_pipeline(
             archive_path,
             expected_sha256,
@@ -112,7 +112,7 @@ pub fn run_ramfs_transit_cinema(
             match res {
                 Ok(summary) => {
                     lock.percent = 100;
-                    lock.status_text = "Transit erfolgreich! Asgard-Subvolumes bereit.".to_string();
+                    lock.status_text = "Transit complete! Asgard subvolumes are armed and ready.".to_string();
                     lock.summary = Some(summary);
                     lock.finished = true;
                 }
@@ -198,7 +198,7 @@ pub fn run_ramfs_transit_cinema(
         return Ok(summary.clone());
     }
 
-    Err(io::Error::new(io::ErrorKind::Interrupted, "Migration abgebrochen"))
+    Err(io::Error::new(io::ErrorKind::Interrupted, "Migration aborted by user"))
 }
 
 fn render_cinema_frame(f: &mut Frame, st: &TransitStatus, tick: usize, elapsed: Duration) {
@@ -207,26 +207,34 @@ fn render_cinema_frame(f: &mut Frame, st: &TransitStatus, tick: usize, elapsed: 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5), // Header
+            Constraint::Length(7), // Header with Isometric BRIDGE ASCII Art
             Constraint::Length(9), // Bifröst Rainbow Bridge
             Constraint::Length(8), // Step Matrix & Telemetry
             Constraint::Min(3),    // Status bar / Countdown
         ])
         .split(size);
 
-    // 1. Header Block
+    // 1. Header Block (User's stylized isometric font)
     let header_text = vec![
         Line::from(vec![
-            Span::styled("  ██████╗ ██╗███████╗██████╗  ██████╗ ███████╗████████╗ ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
-            Span::styled(" [ RAMFS TRANSIT ENGINE ]", Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" ______     ______     __     _____     ______     ______    ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
+            Span::styled(" [ BIFRÖST RAMFS TRANSIT ENGINE ]", Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled("  ██╔══██╗██║██╔════╝██╔══██╗██╔═══██╗██╔════╝╚══██╔══╝ ", Style::default().fg(C_TITLE)),
-            Span::styled(" DIE BRÜCKE NACH ASGARD (LINUX)", Style::default().fg(C_TEXT)),
+            Span::styled("/\\  == \\   /\\  == \\   /\\ \\   /\\  __-.  /\\  ___\\   /\\  ___\\   ", Style::default().fg(C_TITLE)),
+            Span::styled(" THE BRIDGE TO ASGARD (LINUX)", Style::default().fg(C_TEXT)),
         ]),
         Line::from(vec![
-            Span::styled("  ██████╔╝██║█████╗  ██████╔╝██║   ██║███████╗   ██║    ", Style::default().fg(C_TITLE)),
-            Span::styled(format!(" Laufzeit: {:02}:{:02}", elapsed.as_secs() / 60, elapsed.as_secs() % 60), Style::default().fg(C_MUTED)),
+            Span::styled("\\ \\  __<   \\ \\  __<   \\ \\ \\  \\ \\ \\/\\ \\ \\ \\ \\__ \\  \\ \\  __\\   ", Style::default().fg(C_TITLE)),
+            Span::styled(format!(" Elapsed: {:02}:{:02}", elapsed.as_secs() / 60, elapsed.as_secs() % 60), Style::default().fg(C_MUTED)),
+        ]),
+        Line::from(vec![
+            Span::styled(" \\ \\_____\\  \\ \\_\\ \\_\\  \\ \\_\\  \\ \\____-  \\ \\_____\\  \\ \\_____\\ ", Style::default().fg(C_TITLE)),
+            Span::styled(" Zero-BIOS Zero-Media In-Place Handoff", Style::default().fg(C_ASGARD)),
+        ]),
+        Line::from(vec![
+            Span::styled("  \\/_____/   \\/_/ /_/   \\/_/   \\/____/   \\/_____/   \\/_____/ ", Style::default().fg(C_TITLE)),
+            Span::styled(" Pure In-Memory Early Boot Migration", Style::default().fg(C_MUTED)),
         ]),
     ];
     let header_p = Paragraph::new(header_text).block(
@@ -252,7 +260,7 @@ fn render_bifrost_bridge(f: &mut Frame, area: Rect, st: &TransitStatus, tick: us
         .borders(Borders::ALL)
         .border_style(Style::default().fg(C_RUNES))
         .border_type(BorderType::Double)
-        .title(Span::styled(" ⚡ BIFRÖST KONTINUUM ⚡ ", Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(" ⚡ BIFRÖST CONTINUUM ⚡ ", Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)));
 
     let inner = bridge_block.inner(area);
     f.render_widget(bridge_block, area);
@@ -261,8 +269,12 @@ fn render_bifrost_bridge(f: &mut Frame, area: Rect, st: &TransitStatus, tick: us
         return;
     }
 
-    // Rune particle stream symbols
-    let runes = ["ᚠ", "ᚢ", "ᚦ", "ᚨ", "ᚱ", "ᚲ", "ᚷ", "ᚹ", "ᚺ", "ᚾ", "ᛁ", "ᛃ", "ᛇ", "ᛈ", "ᛉ", "ᛋ", "ᛏ", "ᛒ", "ᛖ", "ᛗ", "ᛚ", "ᛜ", "ᛟ", "ᛞ", "≈", "≋", "∿", "✦", "⚡"];
+    // Rune particle stream symbols: combo of Norse runes and classic carved rune ligatures
+    let runes = [
+        "ᛉ", "|<", "^|^", "|>", "\\Y/", "|B", "|X|", "ᚲ", "//", "<>", 
+        "|P", "ᚱ", "><", "|F", "ᛏ", "|*|", "|L", "ᚦ", "<*>", "|/", 
+        "ᛟ", "ᛞ", "ᚷ", "ᛚ", "ᚠ", "ᛒ", "ᛋ", "ᚹ", "ᚺ", "⚡", "✦", "ᛃ", "ᛈ", "ᛇ", "ᛗ"
+    ];
 
     // Portals
     let midgard_portal = "[ MIDGARD / WIN11 ]";
@@ -371,9 +383,9 @@ fn render_bifrost_bridge(f: &mut Frame, area: Rect, st: &TransitStatus, tick: us
     bot_beam.push('╛');
 
     lines.push(Line::from(vec![
-        Span::styled(format!("{:^width$}", "      (Start)       ", width = portal_width as usize), Style::default().fg(C_MUTED)),
+        Span::styled(format!("{:^width$}", "      (Source)      ", width = portal_width as usize), Style::default().fg(C_MUTED)),
         Span::styled(bot_beam, Style::default().fg(C_TITLE)),
-        Span::styled(format!("{:^width$}", "      (Ziel)        ", width = portal_width as usize), Style::default().fg(C_MUTED)),
+        Span::styled(format!("{:^width$}", "      (Target)      ", width = portal_width as usize), Style::default().fg(C_MUTED)),
     ]));
 
     let p = Paragraph::new(lines).alignment(Alignment::Left);
@@ -382,11 +394,11 @@ fn render_bifrost_bridge(f: &mut Frame, area: Rect, st: &TransitStatus, tick: us
 
 fn render_step_matrix(f: &mut Frame, area: Rect, st: &TransitStatus) {
     let steps = [
-        (1, "Scan & Shrink-Planung", "Block-Devices ermitteln & NTFS-Grenze berechnen"),
-        (2, "NTFS-Verkleinerung", "Zerstörungsfreier ntfsresize & GPT-Partitionierung"),
-        (3, "Btrfs-Schmiede", "Subvolumes (@root, @home, @blackbox) & /etc/fstab"),
-        (4, "Seelentransit (Injektion)", "Blackbox entpacken & POSIX-Rechte (0700/0600)"),
-        (5, "Systemd-Signalfeuer", "systemd-boot auf ESP & Flatpak First-Boot Dienst"),
+        (1, "Scan & Boundary Plan", "Discover block devices & compute safe NTFS boundary"),
+        (2, "NTFS Shrink Execution", "Non-destructive ntfsresize & GPT partitioning"),
+        (3, "Btrfs Subvolume Forge", "Create (@root, @home, @blackbox) & /etc/fstab"),
+        (4, "Soul Transit (Injection)", "Extract Blackbox & enforce POSIX modes (0700/0600)"),
+        (5, "Deploy systemd-boot", "Install EFI bootloader & Flatpak first-boot service"),
     ];
 
     let mut lines = Vec::new();
@@ -402,7 +414,7 @@ fn render_step_matrix(f: &mut Frame, area: Rect, st: &TransitStatus) {
 
         lines.push(Line::from(vec![
             Span::styled(format!("  {icon} Phase {num}: "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:<28}", title), Style::default().fg(if st.step == num { C_TEXT } else { C_MUTED })),
+            Span::styled(format!("{:<26}", title), Style::default().fg(if st.step == num { C_TEXT } else { C_MUTED })),
             Span::styled(format!(" │ {desc}"), Style::default().fg(C_MUTED)),
         ]));
     }
@@ -411,7 +423,7 @@ fn render_step_matrix(f: &mut Frame, area: Rect, st: &TransitStatus) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(C_MUTED))
         .border_type(BorderType::Rounded)
-        .title(Span::styled(" PHASEN-TELEMETRIE ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(" PHASE TELEMETRY ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)));
 
     let p = Paragraph::new(lines).block(block);
     f.render_widget(p, area);
@@ -424,7 +436,7 @@ fn render_bottom_status(f: &mut Frame, area: Rect, st: &TransitStatus) {
         .split(area);
 
     // Progress Gauge
-    let gauge_title = format!(" FORTSCHRITT: {}% │ {} ", st.percent, st.status_text);
+    let gauge_title = format!(" PROGRESS: {}% │ {} ", st.percent, st.status_text);
     let gauge = Gauge::default()
         .block(Block::default())
         .gauge_style(
@@ -440,15 +452,15 @@ fn render_bottom_status(f: &mut Frame, area: Rect, st: &TransitStatus) {
     // Bottom Message / Completion Alert
     let bottom_text = if let Some(err) = &st.error {
         Line::from(vec![
-            Span::styled("  [FEHLER] ", Style::default().fg(C_MIDGARD).add_modifier(Modifier::BOLD)),
+            Span::styled("  [ERROR] ", Style::default().fg(C_MIDGARD).add_modifier(Modifier::BOLD)),
             Span::styled(err, Style::default().fg(C_TEXT)),
-            Span::styled(" (Drücke Enter zum Beenden)", Style::default().fg(C_MUTED)),
+            Span::styled(" (Press Enter to exit)", Style::default().fg(C_MUTED)),
         ])
     } else if st.finished {
         Line::from(vec![
-            Span::styled("  ✦ ✦ ✦ TRANSIT VOLLENDET! ", Style::default().fg(C_ASGARD).add_modifier(Modifier::BOLD)),
-            Span::styled("Willkommen in Asgard! Automatischer Neustart in 5 Sekunden... ", Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled("(Tippe 'reboot -f' zum sofortigen Sprung)", Style::default().fg(C_MUTED)),
+            Span::styled("  ✦ ✦ ✦ TRANSIT COMPLETE! ", Style::default().fg(C_ASGARD).add_modifier(Modifier::BOLD)),
+            Span::styled("Welcome to Asgard! Automated reboot in 5 seconds... ", Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled("(Press Enter to reboot immediately)", Style::default().fg(C_MUTED)),
         ])
     } else {
         Line::from(vec![
