@@ -3,6 +3,7 @@ pub mod fs;
 pub mod handoff;
 pub mod inject;
 pub mod partition;
+pub mod ramfs_cinema;
 
 use std::{
     io,

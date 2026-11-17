@@ -401,16 +401,12 @@ fn run_ramfs_cli(args: &[String]) -> io::Result<()> {
     let expected_sha256 = find_arg_value(args, "--sha256");
     let dry_run = args.iter().any(|a| a == "--dry-run");
 
-    println!("[Bifröst RAMFS Engine] Starte Migration (dry_run={dry_run})...");
-    let summary = bridge::execute_full_bridge_pipeline(
+    let summary = bridge::ramfs_cinema::run_ramfs_transit_cinema(
         Path::new(&archive_str),
         expected_sha256.as_deref(),
         Path::new(&target_str),
         32 * 1024 * 1024 * 1024,
         dry_run,
-        |msg, step, total| {
-            println!("  [{step}/{total}] {msg}");
-        },
     )?;
 
     println!("[OK] Ziel-Partition:  {}", summary.plan.new_linux_partition.display());

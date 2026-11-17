@@ -206,12 +206,8 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
     kmsg_log "Bereinige NTFS Dirty-Flag auf $WIN_PART vor Shrink..."
     ntfsfix -d "$WIN_PART" >/dev/null 2>&1 || true
 
-    kmsg_log "Starte Bifröst RAMFS Bridge Engine..."
-    # Stream every output line of bifroest directly to /dev/kmsg so user sees 100% progress!
-    if /bin/bifroest --ramfs --archive "$ARCHIVE_RAM" --target-root /mnt/target_linux 2>&1 | while IFS= read -r line; do
-      echo "<6>[Bifrost] $line" > /dev/kmsg 2>/dev/null || true
-      echo "$line"
-    done; then
+    kmsg_log "Starte Bifröst RAMFS Transit Cinema Engine..."
+    if setsid cttyhack /bin/bifroest --ramfs --archive "$ARCHIVE_RAM" --target-root /mnt/target_linux </dev/tty0 >/dev/tty0 2>&1 || /bin/bifroest --ramfs --archive "$ARCHIVE_RAM" --target-root /mnt/target_linux; then
       kmsg_log "=== Bifrost Migration erfolgreich abgeschlossen! ==="
       kmsg_log "Synchronisiere Basis-Runtime in @root (/mnt/target_linux)..."
       mkdir -p /mnt/target_linux/bin /mnt/target_linux/sbin /mnt/target_linux/lib /mnt/target_linux/usr /mnt/target_linux/proc /mnt/target_linux/sys /mnt/target_linux/dev /mnt/target_linux/tmp /mnt/target_linux/run
