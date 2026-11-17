@@ -371,7 +371,7 @@ pub fn calculate_shrink_plan(
         format!("ntfsresize --force --no-action --size {ntfs_shrunk_bytes} {win_str}"),
         format!("yes | ntfsresize --force --force --no-progress-bar --size {ntfs_shrunk_bytes} {win_str}"),
         format!(
-            "parted ---pretend-input-tty -s {disk_str} resizepart {} {win_end_mib}MiB Yes",
+            "printf 'Yes\\n' | parted ---pretend-input-tty {disk_str} resizepart {} {win_end_mib}MiB",
             ntfs_part.part_number
         ),
         format!(
@@ -426,11 +426,20 @@ where
         if !dry_run {
             let output = Command::new("sh").args(["-c", cmd]).output()?;
             if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let detail = if !stderr.is_empty() && !stdout.is_empty() {
+                    format!("{stderr} | {stdout}")
+                } else if !stderr.is_empty() {
+                    stderr
+                } else if !stdout.is_empty() {
+                    stdout
+                } else {
+                    format!("exit status: {}", output.status)
+                };
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
-                    format!("Partitioning command failed ({cmd}):\nStdout: {stdout}\nStderr: {stderr}"),
+                    format!("Command failed ({cmd}): {detail}"),
                 ));
             }
         }

@@ -214,27 +214,24 @@ fn render_cinema_frame(f: &mut Frame, st: &TransitStatus, tick: usize, elapsed: 
         ])
         .split(size);
 
-    // 1. Header Block (User's stylized isometric font)
+    // 1. Header Block (User's stylized isometric font + Clean minimalist text)
     let header_text = vec![
         Line::from(vec![
             Span::styled(" ______     ______     __     _____     ______     ______    ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
-            Span::styled(" [ BIFRÖST RAMFS TRANSIT ENGINE ]", Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
             Span::styled("/\\  == \\   /\\  == \\   /\\ \\   /\\  __-.  /\\  ___\\   /\\  ___\\   ", Style::default().fg(C_TITLE)),
-            Span::styled(" THE BRIDGE TO ASGARD (LINUX)", Style::default().fg(C_TEXT)),
+            Span::styled("  THE BRIDGE TO ASGARD", Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
             Span::styled("\\ \\  __<   \\ \\  __<   \\ \\ \\  \\ \\ \\/\\ \\ \\ \\ \\__ \\  \\ \\  __\\   ", Style::default().fg(C_TITLE)),
-            Span::styled(format!(" Elapsed: {:02}:{:02}", elapsed.as_secs() / 60, elapsed.as_secs() % 60), Style::default().fg(C_MUTED)),
+            Span::styled(format!("  Elapsed: {:02}:{:02}", elapsed.as_secs() / 60, elapsed.as_secs() % 60), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
             Span::styled(" \\ \\_____\\  \\ \\_\\ \\_\\  \\ \\_\\  \\ \\____-  \\ \\_____\\  \\ \\_____\\ ", Style::default().fg(C_TITLE)),
-            Span::styled(" Zero-BIOS Zero-Media In-Place Handoff", Style::default().fg(C_ASGARD)),
         ]),
         Line::from(vec![
             Span::styled("  \\/_____/   \\/_/ /_/   \\/_/   \\/____/   \\/_____/   \\/_____/ ", Style::default().fg(C_TITLE)),
-            Span::styled(" Pure In-Memory Early Boot Migration", Style::default().fg(C_MUTED)),
         ]),
     ];
     let header_p = Paragraph::new(header_text).block(
@@ -281,7 +278,7 @@ fn render_bifrost_bridge(f: &mut Frame, area: Rect, st: &TransitStatus, tick: us
     let asgard_portal = "[ ASGARD / LINUX ]";
 
     let portal_width = 20;
-    let bridge_width = inner.width.saturating_sub(portal_width * 2 + 2) as usize;
+    let bridge_width = inner.width.saturating_sub(portal_width * 2) as usize;
 
     // Calculate Blackbox slider position (0 to bridge_width - 1)
     let box_slider = if bridge_width > 0 {
@@ -299,10 +296,12 @@ fn render_bifrost_bridge(f: &mut Frame, area: Rect, st: &TransitStatus, tick: us
         top_beam.push_str(sym);
     }
     top_beam.push('╕');
+    let top_clamped: String = top_beam.chars().take(bridge_width).collect();
+    let top_str = format!("{:<width$}", top_clamped, width = bridge_width);
 
     lines.push(Line::from(vec![
         Span::styled(format!("{:^width$}", "┌──────────────────┐", width = portal_width as usize), Style::default().fg(C_MIDGARD)),
-        Span::styled(top_beam, Style::default().fg(C_TITLE)),
+        Span::styled(top_str, Style::default().fg(C_TITLE)),
         Span::styled(format!("{:^width$}", "┌──────────────────┐", width = portal_width as usize), Style::default().fg(C_ASGARD)),
     ]));
 
@@ -319,10 +318,12 @@ fn render_bifrost_bridge(f: &mut Frame, area: Rect, st: &TransitStatus, tick: us
             break;
         }
     }
+    let stream_upper_clamped: String = stream_upper.chars().take(bridge_width).collect();
+    let stream_upper_str = format!("{:<width$}", stream_upper_clamped, width = bridge_width);
 
     lines.push(Line::from(vec![
         Span::styled(format!("{:^width$}", midgard_portal, width = portal_width as usize), Style::default().fg(C_MIDGARD).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<width$}", stream_upper, width = bridge_width), Style::default().fg(C_RUNES)),
+        Span::styled(stream_upper_str, Style::default().fg(C_RUNES)),
         Span::styled(format!("{:^width$}", asgard_portal, width = portal_width as usize), Style::default().fg(C_ASGARD).add_modifier(Modifier::BOLD)),
     ]));
 
@@ -345,12 +346,14 @@ fn render_bifrost_bridge(f: &mut Frame, area: Rect, st: &TransitStatus, tick: us
             break;
         }
     }
+    let transit_clamped: String = transit_line.chars().take(bridge_width).collect();
+    let transit_str = format!("{:<width$}", transit_clamped, width = bridge_width);
 
     let box_color = if st.finished { C_ASGARD } else { C_GOLD };
 
     lines.push(Line::from(vec![
         Span::styled(format!("{:^width$}", "│   NTFS Volume    │", width = portal_width as usize), Style::default().fg(C_MIDGARD)),
-        Span::styled(format!("{:<width$}", transit_line, width = bridge_width), Style::default().fg(box_color).add_modifier(Modifier::BOLD)),
+        Span::styled(transit_str, Style::default().fg(box_color).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{:^width$}", "│  Btrfs Subvols   │", width = portal_width as usize), Style::default().fg(C_ASGARD)),
     ]));
 
@@ -367,10 +370,12 @@ fn render_bifrost_bridge(f: &mut Frame, area: Rect, st: &TransitStatus, tick: us
             break;
         }
     }
+    let stream_lower_clamped: String = stream_lower.chars().take(bridge_width).collect();
+    let stream_lower_str = format!("{:<width$}", stream_lower_clamped, width = bridge_width);
 
     lines.push(Line::from(vec![
         Span::styled(format!("{:^width$}", "└──────────────────┘", width = portal_width as usize), Style::default().fg(C_MIDGARD)),
-        Span::styled(format!("{:<width$}", stream_lower, width = bridge_width), Style::default().fg(C_RUNES)),
+        Span::styled(stream_lower_str, Style::default().fg(C_RUNES)),
         Span::styled(format!("{:^width$}", "└──────────────────┘", width = portal_width as usize), Style::default().fg(C_ASGARD)),
     ]));
 
@@ -381,10 +386,12 @@ fn render_bifrost_bridge(f: &mut Frame, area: Rect, st: &TransitStatus, tick: us
         bot_beam.push_str(sym);
     }
     bot_beam.push('╛');
+    let bot_clamped: String = bot_beam.chars().take(bridge_width).collect();
+    let bot_str = format!("{:<width$}", bot_clamped, width = bridge_width);
 
     lines.push(Line::from(vec![
         Span::styled(format!("{:^width$}", "      (Source)      ", width = portal_width as usize), Style::default().fg(C_MUTED)),
-        Span::styled(bot_beam, Style::default().fg(C_TITLE)),
+        Span::styled(bot_str, Style::default().fg(C_TITLE)),
         Span::styled(format!("{:^width$}", "      (Target)      ", width = portal_width as usize), Style::default().fg(C_MUTED)),
     ]));
 
@@ -430,6 +437,28 @@ fn render_step_matrix(f: &mut Frame, area: Rect, st: &TransitStatus) {
 }
 
 fn render_bottom_status(f: &mut Frame, area: Rect, st: &TransitStatus) {
+    if let Some(err) = &st.error {
+        let err_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(C_MIDGARD))
+            .border_type(BorderType::Double)
+            .title(Span::styled(" ⚠ PIPELINE ERROR - DETAILS ⚠ ", Style::default().fg(C_MIDGARD).add_modifier(Modifier::BOLD)));
+
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(" Action: ", Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled("Press [Enter] or [Q] to reboot cleanly.", Style::default().fg(C_TEXT)),
+            ]),
+            Line::from(vec![
+                Span::styled(" Details: ", Style::default().fg(C_TITLE).add_modifier(Modifier::BOLD)),
+                Span::styled(err.replace('\n', " ↵ "), Style::default().fg(C_TEXT)),
+            ]),
+        ];
+        let p = Paragraph::new(lines).block(err_block).wrap(ratatui::widgets::Wrap { trim: true });
+        f.render_widget(p, area);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Length(2)])
@@ -450,13 +479,7 @@ fn render_bottom_status(f: &mut Frame, area: Rect, st: &TransitStatus) {
     f.render_widget(gauge, chunks[0]);
 
     // Bottom Message / Completion Alert
-    let bottom_text = if let Some(err) = &st.error {
-        Line::from(vec![
-            Span::styled("  [ERROR] ", Style::default().fg(C_MIDGARD).add_modifier(Modifier::BOLD)),
-            Span::styled(err, Style::default().fg(C_TEXT)),
-            Span::styled(" (Press Enter to exit)", Style::default().fg(C_MUTED)),
-        ])
-    } else if st.finished {
+    let bottom_text = if st.finished {
         Line::from(vec![
             Span::styled("  ✦ ✦ ✦ TRANSIT COMPLETE! ", Style::default().fg(C_ASGARD).add_modifier(Modifier::BOLD)),
             Span::styled("Welcome to Asgard! Automated reboot in 5 seconds... ", Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
