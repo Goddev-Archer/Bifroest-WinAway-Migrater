@@ -70,6 +70,8 @@ jobs:
             apk add --no-cache \
               linux-virt \
               busybox-static \
+              apk-tools-static \
+              ca-certificates-bundle \
               kmod \
               ntfs-3g \
               ntfs-3g-progs \

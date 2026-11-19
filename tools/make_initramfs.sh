@@ -60,17 +60,62 @@ if [ -f /lib/ld-musl-x86_64.so.1 ] && [ ! -f "$WORK_DIR/lib/ld-musl-x86_64.so.1"
   cp -L /lib/ld-musl-x86_64.so.1 "$WORK_DIR/lib/"
 fi
 
+# BusyBox udhcpc Konfigurationsskript (setzt IPv4, Gateway & DNS im RAMFS und im Zielsystem)
+mkdir -p "$WORK_DIR/usr/share/udhcpc"
+cat << 'EOS' > "$WORK_DIR/usr/share/udhcpc/default.script"
+#!/bin/sh
+case "$1" in
+  deconfig)
+    ip addr flush dev "$interface" 2>/dev/null || true
+    ip link set dev "$interface" up 2>/dev/null || true
+    ;;
+  bound|renew)
+    ip addr add "$ip/${mask:-24}" dev "$interface" 2>/dev/null || true
+    if [ -n "$router" ]; then
+      for r in $router; do
+        ip route replace default via "$r" dev "$interface" 2>/dev/null && break
+      done
+    fi
+    : > /etc/resolv.conf
+    for d in $dns; do
+      echo "nameserver $d" >> /etc/resolv.conf
+    done
+    [ -s /etc/resolv.conf ] || echo "nameserver 1.1.1.1" > /etc/resolv.conf
+    ;;
+esac
+exit 0
+EOS
+chmod +x "$WORK_DIR/usr/share/udhcpc/default.script"
+
 # Bundled base Linux rootfs (/usr/share/bifrost/base-rootfs.tar.zst) BEFORE copying heavy kernel modules
 if command -v zstd >/dev/null 2>&1; then
   echo "[Bifrost] Erstelle gebündeltes Basis-Rootfs (/usr/share/bifrost/base-rootfs.tar.zst)..."
-  for d in bin sbin usr/bin usr/sbin usr/lib usr/local/bin lib lib64 etc etc/profile.d var/lib/bifrost var/log root home proc sys dev run tmp mnt boot/efi; do
+  for d in bin sbin usr/bin usr/sbin usr/lib usr/local/bin usr/local/sbin usr/share/udhcpc lib lib64 etc etc/profile.d etc/apk/keys etc/ssl/certs lib/apk/db var/lib/bifrost var/cache/apk var/log root home proc sys dev dev/pts dev/shm run tmp mnt boot/efi; do
     mkdir -p "$ROOTFS_STAGE/$d"
   done
   chmod 1777 "$ROOTFS_STAGE/tmp"
+  ln -sf ../run "$ROOTFS_STAGE/var/run"
 
   cp -a "$WORK_DIR/bin/." "$ROOTFS_STAGE/bin/"
   cp -a "$WORK_DIR/lib/." "$ROOTFS_STAGE/lib/" 2>/dev/null || true
   cp -a "$WORK_DIR/usr/lib/." "$ROOTFS_STAGE/usr/lib/" 2>/dev/null || true
+  cp -a "$WORK_DIR/usr/share/udhcpc/default.script" "$ROOTFS_STAGE/usr/share/udhcpc/default.script"
+  chmod +x "$ROOTFS_STAGE/usr/share/udhcpc/default.script"
+
+  # Vorinstalliertes apk.static + Alpine v3.20 Keys/Certs + initialisierte APK-Datenbank
+  if [ -x /sbin/apk.static ]; then
+    cp /sbin/apk.static "$ROOTFS_STAGE/sbin/apk.static"
+    chmod +x "$ROOTFS_STAGE/sbin/apk.static"
+    ln -sf /sbin/apk.static "$ROOTFS_STAGE/sbin/apk"
+    cp -a /etc/apk/keys/. "$ROOTFS_STAGE/etc/apk/keys/" 2>/dev/null || true
+    cp -a /etc/ssl/certs/. "$ROOTFS_STAGE/etc/ssl/certs/" 2>/dev/null || true
+    cat << 'EOS' > "$ROOTFS_STAGE/etc/apk/repositories"
+https://dl-cdn.alpinelinux.org/alpine/v3.20/main
+https://dl-cdn.alpinelinux.org/alpine/v3.20/community
+EOS
+    /sbin/apk.static --root "$ROOTFS_STAGE" --initdb add >/dev/null 2>&1 || \
+      touch "$ROOTFS_STAGE/lib/apk/db/installed" "$ROOTFS_STAGE/lib/apk/db/lock" "$ROOTFS_STAGE/lib/apk/db/scripts.tar" "$ROOTFS_STAGE/lib/apk/db/triggers"
+  fi
 
   for applet in $("$WORK_DIR/bin/busybox" --list 2>/dev/null || true); do
     [ -n "$applet" ] || continue
@@ -78,7 +123,7 @@ if command -v zstd >/dev/null 2>&1; then
       ln -sf /bin/busybox "$ROOTFS_STAGE/bin/$applet"
     fi
   done
-  for scmd in init mdev modprobe insmod poweroff reboot halt switch_root getty login; do
+  for scmd in init mdev modprobe insmod poweroff reboot halt switch_root getty login udhcpc; do
     if [ ! -e "$ROOTFS_STAGE/sbin/$scmd" ]; then
       ln -sf /bin/busybox "$ROOTFS_STAGE/sbin/$scmd"
     fi
@@ -96,23 +141,37 @@ root:x:0:0:root:/root:/bin/sh
 EOS
   cat << 'EOS' > "$ROOTFS_STAGE/etc/group"
 root:x:0:
+tty:x:5:
+disk:x:6:
+lp:x:7:
+kmem:x:9:
+wheel:x:10:root
+audio:x:18:
+cdrom:x:19:
+dialout:x:20:
+video:x:27:
+users:x:100:
+input:x:101:
 EOS
   echo "asgard-linux" > "$ROOTFS_STAGE/etc/hostname"
   cat << 'EOS' > "$ROOTFS_STAGE/etc/os-release"
-NAME="Arch Linux"
-PRETTY_NAME="Arch Linux (Bifrost Asgard)"
-ID=arch
-ID_LIKE=archlinux
+NAME="Alpine Linux"
+PRETTY_NAME="Alpine Linux (Bifrost Asgard Minimal)"
+ID=alpine
+ID_LIKE=alpine
 EOS
   cat << 'EOS' > "$ROOTFS_STAGE/etc/inittab"
 ::sysinit:/bin/mount -o remount,rw /
+::sysinit:/bin/mkdir -p /dev/pts /dev/shm /run
+::sysinit:/bin/mount -t devpts devpts /dev/pts
+::sysinit:/bin/mount -t tmpfs tmpfs /dev/shm
 ::once:/bin/mdev -s
 tty1::respawn:/bin/sh -l
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/bin/umount -a -r
 EOS
   cat << 'EOS' > "$ROOTFS_STAGE/etc/profile"
-export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin
+export PATH=/usr/local/sbin:/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin
 export TERM=linux
 export PS1='[\u@asgard-linux \W]\$ '
 for f in /etc/profile.d/*.sh; do
@@ -144,12 +203,12 @@ else
 fi
 
 # Symlinks für BusyBox Applets (bestehende echte Binaries wie modprobe nicht überschreiben)
-for cmd in sh mount umount mdev insmod mkdir find head cp mv rm cat echo grep sleep clear poweroff reboot ls yes dd df chmod chown chroot cttyhack setsid sync uname; do
+for cmd in sh mount umount mdev insmod mkdir find head tail cp mv rm cat echo grep awk cut tr sleep clear poweroff reboot ls yes dd df du chmod chown chroot cttyhack setsid sync uname ip udhcpc ln; do
   if [ ! -e "$WORK_DIR/bin/$cmd" ]; then
     ln -sf /bin/busybox "$WORK_DIR/bin/$cmd"
   fi
 done
-for cmd in mdev modprobe insmod switch_root init; do
+for cmd in mdev modprobe insmod switch_root init udhcpc; do
   if [ ! -e "$WORK_DIR/sbin/$cmd" ]; then
     if [ -x "$WORK_DIR/bin/$cmd" ]; then
       ln -sf "/bin/$cmd" "$WORK_DIR/sbin/$cmd"
@@ -183,7 +242,9 @@ export TERM=linux
 mount -t proc none /proc
 mount -t sysfs none /sys
 mount -t devtmpfs none /dev || true
-mkdir -p /dev/pts /run /tmp /mnt/win_src /mnt/target_linux
+mkdir -p /dev/pts /dev/shm /run /tmp /mnt/win_src /mnt/target_linux
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
 mount -t tmpfs none /run || true
 mount -t tmpfs none /tmp || true
 echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
@@ -208,7 +269,7 @@ kmsg_log "=== Bifrost Linux RAMFS Migration Kernel ==="
 kmsg_log "============================================="
 kmsg_log "Lade Storage-, Hyper-V- und Dateisystem-Treiber..."
 
-for mod in hv_vmbus hyperv_keyboard hyperv_drm hv_storvsc hv_utils hid hid_hyperv atkbd serio evdev scsi_mod sd_mod nvme virtio_pci virtio_blk virtio_scsi btrfs vfat fat nls_cp437 nls_iso8859_1 fuse ntfs3; do
+for mod in hv_vmbus hyperv_keyboard hyperv_drm hv_storvsc hv_utils hv_netvsc hid hid_hyperv atkbd serio evdev scsi_mod sd_mod nvme virtio_pci virtio_blk virtio_scsi virtio_net btrfs ext4 vfat fat nls_cp437 nls_iso8859_1 fuse ntfs3; do
   modprobe "$mod" 2>/dev/null || true
 done
 
@@ -225,6 +286,48 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
   sleep 1
 done
 
+bring_up_network() {
+  for netmod in hv_netvsc virtio_net e1000 e1000e r8169 igb; do
+    modprobe "$netmod" 2>/dev/null || true
+  done
+  ip link set lo up 2>/dev/null || true
+  for ifpath in /sys/class/net/*; do
+    [ -e "$ifpath" ] || continue
+    ifname="${ifpath##*/}"
+    [ "$ifname" = "lo" ] && continue
+    kmsg_log "Aktiviere Netzwerk-Interface $ifname (DHCP)..."
+    ip link set "$ifname" up 2>/dev/null || true
+    udhcpc -t 5 -T 1 -n -q -i "$ifname" -s /usr/share/udhcpc/default.script >/dev/null 2>&1 || true
+    if ip -4 addr show dev "$ifname" 2>/dev/null | grep -q "inet "; then
+      kmsg_log "Netzwerk aktiv auf $ifname."
+      break
+    fi
+  done
+}
+
+install_target_runtime_helpers() {
+  TGT="$1"
+  KREL="$(uname -r 2>/dev/null || true)"
+  if [ -n "$KREL" ] && [ -d "/lib/modules/$KREL" ] && [ ! -d "$TGT/lib/modules/$KREL" ]; then
+    mkdir -p "$TGT/lib/modules"
+    cp -a "/lib/modules/$KREL" "$TGT/lib/modules/" 2>/dev/null || true
+  fi
+  mkdir -p "$TGT/usr/local/bin" "$TGT/usr/local/sbin" "$TGT/usr/share/udhcpc"
+  if [ -x /bin/busybox ] && [ ! -x "$TGT/usr/local/bin/busybox" ]; then
+    cp /bin/busybox "$TGT/usr/local/bin/busybox" 2>/dev/null || true
+    chmod +x "$TGT/usr/local/bin/busybox" 2>/dev/null || true
+  fi
+  if [ -x /usr/share/udhcpc/default.script ] && [ ! -x "$TGT/usr/share/udhcpc/default.script" ]; then
+    cp /usr/share/udhcpc/default.script "$TGT/usr/share/udhcpc/default.script" 2>/dev/null || true
+    chmod +x "$TGT/usr/share/udhcpc/default.script" 2>/dev/null || true
+  fi
+  for pcmd in reboot poweroff; do
+    if [ ! -e "$TGT/sbin/$pcmd" ] && [ ! -e "$TGT/usr/bin/$pcmd" ] && [ ! -e "$TGT/usr/local/sbin/$pcmd" ]; then
+      ln -sf /usr/local/bin/busybox "$TGT/usr/local/sbin/$pcmd" 2>/dev/null || true
+    fi
+  done
+}
+
 if grep -q "bifrost_auto=1" /proc/cmdline; then
   kmsg_log "Suche bifrost_blackbox.tar.zst auf Windows/NTFS-Partitionen..."
   ARCHIVE_RAM="/tmp/bifrost_blackbox.tar.zst"
@@ -234,7 +337,7 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
   for part in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* /dev/nvme[0-9]n[0-9]p[0-9]*; do
     [ -b "$part" ] || continue
     FSTYPE=$(blkid -s TYPE -o value "$part" 2>/dev/null || true)
-    if [ "$FSTYPE" = "btrfs" ] || [ "$FSTYPE" = "vfat" ] || [ "$FSTYPE" = "swap" ]; then
+    if [ "$FSTYPE" = "btrfs" ] || [ "$FSTYPE" = "ext4" ] || [ "$FSTYPE" = "vfat" ] || [ "$FSTYPE" = "swap" ]; then
       continue
     fi
     kmsg_log "Prüfe NTFS-Partition $part..."
@@ -253,8 +356,14 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
 
         FOUND_ROOTFS=$(find /mnt/win_src -maxdepth 5 \( -iname "bifrost_rootfs.tar.zst" -o -iname "archlinux-bootstrap*.tar.zst" \) 2>/dev/null | head -n 1 || true)
         if [ -n "$FOUND_ROOTFS" ]; then
-          kmsg_log "Staged Linux Rootfs gefunden: $FOUND_ROOTFS -> RAM ($ROOTFS_RAM)"
-          cp "$FOUND_ROOTFS" "$ROOTFS_RAM" || true
+          ROOTFS_KB=$(du -k "$FOUND_ROOTFS" 2>/dev/null | awk '{print $1}')
+          TMP_AVAIL_KB=$(df -k /tmp 2>/dev/null | tail -n 1 | awk '{print $4}')
+          if [ -n "$ROOTFS_KB" ] && [ -n "$TMP_AVAIL_KB" ] && [ "$TMP_AVAIL_KB" -gt "$((ROOTFS_KB + 32768))" ]; then
+            kmsg_log "Staged Linux Rootfs gefunden: $FOUND_ROOTFS -> RAM ($ROOTFS_RAM)"
+            cp "$FOUND_ROOTFS" "$ROOTFS_RAM" || rm -f "$ROOTFS_RAM"
+          else
+            kmsg_log "[WARN] Zu wenig RAM in /tmp (${TMP_AVAIL_KB:-0} KB) fuer Rootfs (${ROOTFS_KB:-0} KB) - nutze eingebettetes Asgard-Rootfs."
+          fi
         fi
 
         umount /mnt/win_src || true
@@ -264,19 +373,31 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
     fi
   done
 
-  # Boot #2 Check: Wenn keine offene Blackbox-Migration ansteht, pruefe auf bereits installiertes @root Asgard System!
+  # Boot #2 Check: Wenn keine offene Blackbox-Migration ansteht, pruefe auf bereits installiertes Linux-System (Btrfs oder Ext4)!
   if [ -z "$WIN_PART" ]; then
     for part in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* /dev/nvme[0-9]n[0-9]p[0-9]*; do
       [ -b "$part" ] || continue
       FSTYPE=$(blkid -s TYPE -o value "$part" 2>/dev/null || true)
-      [ "$FSTYPE" = "btrfs" ] || continue
-      if mount -t btrfs -o noatime,compress=zstd:1,space_cache=v2,subvol=@root "$part" /mnt/target_linux 2>/dev/null; then
+      MOUNTED_ROOT=0
+      if [ "$FSTYPE" = "btrfs" ]; then
+        if mount -t btrfs -o noatime,compress=zstd:1,space_cache=v2,subvol=@root "$part" /mnt/target_linux 2>/dev/null; then
+          MOUNTED_ROOT=1
+        fi
+      elif [ "$FSTYPE" = "ext4" ]; then
+        if mount -t ext4 -o noatime "$part" /mnt/target_linux 2>/dev/null; then
+          MOUNTED_ROOT=1
+        fi
+      fi
+
+      if [ "$MOUNTED_ROOT" = "1" ]; then
         if [ -f /mnt/target_linux/.bifrost_installed ]; then
-          kmsg_log "Installiertes Asgard Linux (@root) auf $part gefunden - starte Pivot/Boot!"
+          kmsg_log "Installiertes Zielsystem ($FSTYPE) auf $part gefunden - starte Pivot/Boot!"
           mkdir -p /mnt/target_linux/home /mnt/target_linux/var/lib/bifrost /mnt/target_linux/.snapshots /mnt/target_linux/boot/efi /mnt/target_linux/proc /mnt/target_linux/sys /mnt/target_linux/dev /mnt/target_linux/run /mnt/target_linux/tmp
-          mount -t btrfs -o noatime,compress=zstd:1,space_cache=v2,subvol=@home "$part" /mnt/target_linux/home 2>/dev/null || true
-          mount -t btrfs -o noatime,compress=zstd:1,space_cache=v2,subvol=@blackbox "$part" /mnt/target_linux/var/lib/bifrost 2>/dev/null || true
-          mount -t btrfs -o noatime,compress=zstd:1,space_cache=v2,subvol=@snapshots "$part" /mnt/target_linux/.snapshots 2>/dev/null || true
+          if [ "$FSTYPE" = "btrfs" ]; then
+            mount -t btrfs -o noatime,compress=zstd:1,space_cache=v2,subvol=@home "$part" /mnt/target_linux/home 2>/dev/null || true
+            mount -t btrfs -o noatime,compress=zstd:1,space_cache=v2,subvol=@blackbox "$part" /mnt/target_linux/var/lib/bifrost 2>/dev/null || true
+            mount -t btrfs -o noatime,compress=zstd:1,space_cache=v2,subvol=@snapshots "$part" /mnt/target_linux/.snapshots 2>/dev/null || true
+          fi
 
           for efip in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* /dev/nvme[0-9]n[0-9]p[0-9]*; do
             [ -b "$efip" ] || continue
@@ -286,20 +407,29 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
             fi
           done
 
-          KREL="$(uname -r 2>/dev/null || true)"
-          if [ -n "$KREL" ] && [ -d "/lib/modules/$KREL" ] && [ ! -d "/mnt/target_linux/lib/modules/$KREL" ]; then
-            mkdir -p /mnt/target_linux/lib/modules
-            cp -a "/lib/modules/$KREL" /mnt/target_linux/lib/modules/ 2>/dev/null || true
+          # Auto-Netzwerk vor switch_root aktivieren (IPv4 & Routen bleiben im Kernel erhalten!)
+          bring_up_network
+          if [ -s /etc/resolv.conf ]; then
+            cp /etc/resolv.conf /mnt/target_linux/etc/resolv.conf 2>/dev/null || true
+          elif [ ! -s /mnt/target_linux/etc/resolv.conf ]; then
+            echo "nameserver 1.1.1.1" > /mnt/target_linux/etc/resolv.conf 2>/dev/null || true
           fi
+
+          install_target_runtime_helpers /mnt/target_linux
 
           mount --move /proc /mnt/target_linux/proc
           mount --move /sys /mnt/target_linux/sys
           mount --move /dev /mnt/target_linux/dev
           mount --move /run /mnt/target_linux/run 2>/dev/null || true
+          mkdir -p /mnt/target_linux/dev/pts /mnt/target_linux/dev/shm
+          mount -t devpts devpts /mnt/target_linux/dev/pts 2>/dev/null || true
+          mount -t tmpfs tmpfs /mnt/target_linux/dev/shm 2>/dev/null || true
 
           clear 2>/dev/null || true
           if [ -x /mnt/target_linux/sbin/init ] || [ -L /mnt/target_linux/sbin/init ]; then
             exec switch_root /mnt/target_linux /sbin/init
+          elif [ -x /mnt/target_linux/usr/local/sbin/bifrost-init ]; then
+            exec switch_root /mnt/target_linux /usr/local/sbin/bifrost-init
           else
             exec chroot /mnt/target_linux /bin/sh -l </dev/tty0 >/dev/tty0 2>&1
           fi
@@ -319,12 +449,8 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
       echo "7 7 1 7" > /proc/sys/kernel/printk 2>/dev/null || true
       kmsg_log "=== Bifrost Migration erfolgreich abgeschlossen! ==="
 
-      # Ensure kernel modules are present inside installed @root
-      KREL="$(uname -r 2>/dev/null || true)"
-      if [ -n "$KREL" ] && [ -d "/lib/modules/$KREL" ] && [ ! -d "/mnt/target_linux/lib/modules/$KREL" ]; then
-        mkdir -p /mnt/target_linux/lib/modules
-        cp -a "/lib/modules/$KREL" /mnt/target_linux/lib/modules/ 2>/dev/null || true
-      fi
+      # Ensure kernel modules & runtime helpers are present inside installed root
+      install_target_runtime_helpers /mnt/target_linux
 
       sync
       for mnt in /mnt/target_linux/boot/efi /mnt/target_linux/home /mnt/target_linux/var/lib/bifrost /mnt/target_linux/.snapshots /mnt/target_linux; do

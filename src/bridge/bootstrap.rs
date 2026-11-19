@@ -2,8 +2,6 @@ use std::{
     fs::{self, File},
     io::{self, BufReader},
     path::{Component, Path, PathBuf},
-    thread,
-    time::Duration,
 };
 use tar::Archive;
 use zstd::Decoder;
@@ -149,13 +147,29 @@ where
         let entry_type = entry.header().entry_type();
 
         if entry_type.is_dir() {
-            fs::create_dir_all(&dest)?;
+            let is_symlink = dest
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if !is_symlink {
+                fs::create_dir_all(&dest)?;
+                #[cfg(unix)]
+                if let Ok(mode) = entry.header().mode() {
+                    let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(mode & 0o7777));
+                }
+            }
         } else if entry_type.is_symlink() {
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }
             if let Ok(Some(link_target)) = entry.link_name() {
-                let _ = fs::remove_file(&dest);
+                if let Ok(meta) = dest.symlink_metadata() {
+                    if meta.is_dir() && !meta.file_type().is_symlink() {
+                        let _ = fs::remove_dir(&dest);
+                    } else {
+                        let _ = fs::remove_file(&dest);
+                    }
+                }
                 #[cfg(unix)]
                 {
                     let _ = symlink(&link_target, &dest);
@@ -187,22 +201,270 @@ where
             io::copy(&mut entry, &mut out)?;
             #[cfg(unix)]
             if let Ok(mode) = entry.header().mode() {
-                let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(mode));
+                let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(mode & 0o7777));
             }
         }
 
         files_count += 1;
-        if files_count % 25 == 0 {
+        if files_count % 100 == 0 {
             progress_cb(
                 &format!("Extracting Linux rootfs ({files_count} files): {clean_str}"),
                 1,
                 total_steps,
             );
-            thread::sleep(Duration::from_millis(2));
         }
     }
 
+    #[cfg(unix)]
+    {
+        let tmp_dir = target_root.join("tmp");
+        let _ = fs::create_dir_all(&tmp_dir);
+        let _ = fs::set_permissions(&tmp_dir, fs::Permissions::from_mode(0o1777));
+    }
+
     Ok(files_count)
+}
+
+/// Appends standard Linux device/system groups missing from `/etc/group` without touching existing entries.
+fn ensure_standard_groups(etc_dir: &Path) -> io::Result<()> {
+    let group_path = etc_dir.join("group");
+    let existing = fs::read_to_string(&group_path).unwrap_or_else(|_| "root:x:0:\n".to_string());
+    let mut updated = existing.clone();
+    if !updated.ends_with('\n') && !updated.is_empty() {
+        updated.push('\n');
+    }
+
+    let defaults = [
+        ("root", "root:x:0:"),
+        ("tty", "tty:x:5:"),
+        ("disk", "disk:x:6:"),
+        ("lp", "lp:x:7:"),
+        ("kmem", "kmem:x:9:"),
+        ("wheel", "wheel:x:10:root"),
+        ("audio", "audio:x:18:"),
+        ("cdrom", "cdrom:x:19:"),
+        ("dialout", "dialout:x:20:"),
+        ("video", "video:x:27:"),
+        ("input", "input:x:101:"),
+        ("users", "users:x:100:"),
+    ];
+
+    for (name, line) in defaults {
+        let prefix = format!("{name}:");
+        if !updated.lines().any(|l| l.starts_with(&prefix)) {
+            updated.push_str(line);
+            updated.push('\n');
+        }
+    }
+
+    fs::write(&group_path, updated)
+}
+
+/// Configures active Arch Linux geo-mirrors in `/etc/pacman.d/mirrorlist` if a real Arch rootfs is present.
+pub fn configure_arch_mirrors_if_present(target_root: &Path) -> io::Result<bool> {
+    let mirrorlist = target_root.join("etc/pacman.d/mirrorlist");
+    if !mirrorlist.exists() {
+        return Ok(false);
+    }
+    let existing = fs::read_to_string(&mirrorlist).unwrap_or_default();
+    let has_active_server = existing
+        .lines()
+        .map(str::trim)
+        .any(|l| l.starts_with("Server =") || l.starts_with("Server="));
+    if has_active_server {
+        return Ok(true);
+    }
+
+    let header = "\
+## Enabled by Bifrost Zero-BIOS Transit Engine
+Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
+Server = http://geo.mirror.pkgbuild.com/$repo/os/$arch
+
+";
+    fs::write(&mirrorlist, format!("{header}{existing}"))?;
+    Ok(true)
+}
+
+/// Writes an accurate `/etc/os-release` ONLY if the extracted distro did not ship its own genuine identity.
+fn ensure_os_release(etc_dir: &Path, target_distro: &str) -> io::Result<()> {
+    let os_release_path = etc_dir.join("os-release");
+    if let Ok(existing) = fs::read_to_string(&os_release_path) {
+        let trimmed = existing.trim();
+        // Preserve genuine distro os-release (e.g. extracted Arch Linux, Fedora, Debian, NixOS)
+        if !trimmed.is_empty() && !trimmed.contains("Bifrost Asgard") {
+            return Ok(());
+        }
+    }
+
+    let lc = target_distro.to_lowercase();
+    let (id, id_like) = if lc.contains("arch") {
+        ("arch", "archlinux")
+    } else if lc.contains("fedora") {
+        ("fedora", "rhel")
+    } else if lc.contains("debian") {
+        ("debian", "debian")
+    } else if lc.contains("nixos") {
+        ("nixos", "nixos")
+    } else {
+        ("alpine", "alpine")
+    };
+
+    let content = format!(
+        "NAME=\"{target_distro}\"\n\
+         PRETTY_NAME=\"{target_distro} (Bifrost Asgard)\"\n\
+         ID={id}\n\
+         ID_LIKE={id_like}\n\
+         HOME_URL=\"https://github.com/Goddev-Archer/Bifroest-WinAway-Migrater\"\n"
+    );
+    fs::write(&os_release_path, content)
+}
+
+/// Generates `/usr/local/sbin/bifrost-init` (safe PID-1 respawn init for bootstrap rootfs images without systemd).
+fn generate_bifrost_init_script() -> String {
+    "\
+#!/bin/sh
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin
+export TERM=linux
+
+mount -o remount,rw / 2>/dev/null || true
+mkdir -p /dev/pts /dev/shm /run /tmp
+chmod 1777 /tmp 2>/dev/null || true
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+
+if [ -f /etc/hostname ]; then
+  HN=$(cat /etc/hostname 2>/dev/null | head -n 1)
+  [ -n \"$HN\" ] && hostname \"$HN\" 2>/dev/null || true
+fi
+
+SHELL_BIN=\"/bin/sh\"
+if [ -x /usr/bin/bash ]; then
+  SHELL_BIN=\"/usr/bin/bash\"
+elif [ -x /bin/bash ]; then
+  SHELL_BIN=\"/bin/bash\"
+fi
+
+trap 'reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger' INT
+trap 'poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger' PWR TERM HUP
+
+while true; do
+  if [ -x /usr/local/bin/busybox ] && [ -c /dev/tty1 ]; then
+    /usr/local/bin/busybox setsid /usr/local/bin/busybox cttyhack \"$SHELL_BIN\" -l </dev/tty1 >/dev/tty1 2>&1
+  elif [ -c /dev/tty0 ]; then
+    \"$SHELL_BIN\" -l </dev/tty0 >/dev/tty0 2>&1
+  else
+    \"$SHELL_BIN\" -l
+  fi
+  sleep 1
+done
+"
+    .to_string()
+}
+
+/// Generates optional `/usr/local/bin/bifrost-desktop` helper so users freely choose CLI or any DE using their native package manager.
+pub fn generate_desktop_helper_script() -> String {
+    "\
+#!/bin/sh
+set -e
+
+echo \"\"
+echo \"======================================================================\"
+echo \"  BIFROST OPTIONAL DESKTOP & ENVIRONMENT CHOOSER\"
+echo \"  Entscheidungsfreiheit: CLI behalten oder Wunsch-Desktop installieren\"
+echo \"======================================================================\"
+
+if command -v pacman >/dev/null 2>&1; then
+  PM=\"pacman\"
+  echo \"  Erkannter Paketmanager: pacman (Arch Linux)\"
+elif command -v apk >/dev/null 2>&1; then
+  PM=\"apk\"
+  echo \"  Erkannter Paketmanager: apk (Alpine / Asgard Minimal)\"
+else
+  echo \"  Kein unterstuetzter Paketmanager (pacman/apk) gefunden.\"
+  exit 1
+fi
+
+echo \"\"
+echo \"  [1] XFCE4        (Leichtgewichtig, stabil auf Hyper-V & Bare-Metal)\"
+echo \"  [2] KDE Plasma   (Moderner Voll-Desktop)\"
+echo \"  [3] GNOME        (Klassischer Linux-Desktop)\"
+echo \"  [4] Hyprland     (Wayland Tiling Window Manager)\"
+echo \"  [0] Abbrechen    (Reine CLI behalten)\"
+echo \"\"
+printf \"Auswahl [0-4]: \"
+read -r CHOICE
+
+case \"$CHOICE\" in
+  0|\"\")
+    echo \"[Bifrost] Abgebrochen - reine CLI bleibt unveraendert.\"
+    exit 0
+    ;;
+esac
+
+mkdir -p /dev/pts /dev/shm /run/dbus /var/run/dbus
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+
+if [ \"$PM\" = \"pacman\" ]; then
+  if [ ! -d /etc/pacman.d/gnupg/private-keys-v1.d ]; then
+    echo \"[Bifrost] Initialisiere Arch Linux pacman-Schluesselbund...\"
+    pacman-key --init
+    pacman-key --populate archlinux
+  fi
+  pacman -Sy --noconfirm
+  case \"$CHOICE\" in
+    1)
+      pacman -S --noconfirm xorg-server xorg-xinit xf86-video-fbdev xf86-input-libinput xfce4 xfce4-goodies ttf-dejavu dbus
+      echo \"[OK] XFCE4 installiert! Starten mit: startx /usr/bin/startxfce4\"
+      ;;
+    2)
+      pacman -S --noconfirm xorg-server xorg-xinit plasma-meta konsole dolphin ttf-dejavu dbus
+      echo \"[OK] KDE Plasma installiert! Starten mit: startx /usr/bin/startplasma-x11\"
+      ;;
+    3)
+      pacman -S --noconfirm gnome gnome-terminal gdm ttf-dejavu dbus
+      echo \"[OK] GNOME installiert!\"
+      ;;
+    4)
+      pacman -S --noconfirm hyprland kitty waybar wofi ttf-dejavu seatd
+      echo \"[OK] Hyprland installiert! Starten mit: Hyprland\"
+      ;;
+    *)
+      echo \"Ungueltige Auswahl.\"
+      exit 1
+      ;;
+  esac
+else
+  apk update
+  case \"$CHOICE\" in
+    1)
+      apk add --force-overwrite xorg-server xinit eudev xf86-video-fbdev xf86-input-libinput dbus dbus-x11 xfce4 xfce4-terminal font-dejavu
+      udevd --daemon 2>/dev/null || true
+      udevadm trigger 2>/dev/null || true
+      dbus-uuidgen --ensure 2>/dev/null || true
+      dbus-daemon --system 2>/dev/null || true
+      echo \"[OK] XFCE4 installiert! Starten mit: startx /usr/bin/startxfce4\"
+      ;;
+    2)
+      apk add --force-overwrite xorg-server xinit eudev xf86-video-fbdev xf86-input-libinput dbus dbus-x11 plasma-desktop konsole font-dejavu
+      echo \"[OK] KDE Plasma installiert!\"
+      ;;
+    3)
+      apk add --force-overwrite xorg-server xinit eudev dbus dbus-x11 gnome-shell gnome-terminal font-dejavu
+      echo \"[OK] GNOME installiert!\"
+      ;;
+    4)
+      apk add --force-overwrite sway foot eudev dbus font-dejavu
+      echo \"[OK] Sway (Wayland Tiling) installiert!\"
+      ;;
+    *)
+      echo \"Ungueltige Auswahl.\"
+      exit 1
+      ;;
+  esac
+fi
+"
+    .to_string()
 }
 
 /// Deploys optional base rootfs, writes `systemd-boot` entries, Asgard shell environment, hostname, and first-boot provisioning service.
@@ -265,37 +527,72 @@ where
             .output();
     }
 
-    progress_cb("Installiere First-Boot Flatpak-Service...", 3, total_steps);
+    progress_cb("Installiere First-Boot Service & optionale Helfer...", 3, total_steps);
     let (service_unit, postinstall_script) = generate_postinstall_service(manifest);
 
     let systemd_dir = target_root.join("etc/systemd/system");
     let bin_dir = target_root.join("usr/local/bin");
+    let sbin_dir = target_root.join("usr/local/sbin");
     fs::create_dir_all(&systemd_dir)?;
     fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&sbin_dir)?;
 
     fs::write(systemd_dir.join("bifrost-postinstall.service"), service_unit)?;
     let script_path = bin_dir.join("bifrost-postinstall.sh");
     fs::write(&script_path, postinstall_script)?;
 
+    let init_helper_path = sbin_dir.join("bifrost-init");
+    fs::write(&init_helper_path, generate_bifrost_init_script())?;
+
+    let desktop_helper_path = bin_dir.join("bifrost-desktop");
+    fs::write(&desktop_helper_path, generate_desktop_helper_script())?;
+
     #[cfg(unix)]
     {
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(&init_helper_path, fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(&desktop_helper_path, fs::Permissions::from_mode(0o755))?;
     }
 
-    progress_cb("Konfiguriere Asgard System (/etc/hostname, /etc/os-release, Welcome Shell)...", 4, total_steps);
+    progress_cb("Konfiguriere Zielsystem (/etc/hostname, Mirrors, Gruppen, Welcome Shell)...", 4, total_steps);
     let etc_dir = target_root.join("etc");
     let profile_d_dir = etc_dir.join("profile.d");
     fs::create_dir_all(&profile_d_dir)?;
 
+    // Ensure /var/run -> ../run symlink so D-Bus & system sockets work seamlessly
+    let var_dir = target_root.join("var");
+    let _ = fs::create_dir_all(&var_dir);
+    let _ = fs::create_dir_all(target_root.join("run"));
+    #[cfg(unix)]
+    {
+        let var_run = var_dir.join("run");
+        if var_run.symlink_metadata().is_err() {
+            let _ = symlink("../run", &var_run);
+        }
+    }
+
     fs::write(etc_dir.join("hostname"), "asgard-linux\n")?;
-    fs::write(
-        etc_dir.join("os-release"),
-        "NAME=\"Arch Linux\"\nPRETTY_NAME=\"Arch Linux (Bifrost Asgard)\"\nID=arch\nID_LIKE=archlinux\nHOME_URL=\"https://github.com/Goddev-Archer/Bifroest-WinAway-Migrater\"\n",
-    )?;
-    fs::write(
-        etc_dir.join("inittab"),
-        "::sysinit:/bin/mount -a\n::once:/bin/mdev -s\ntty1::respawn:/bin/sh -l\n::ctrlaltdel:/sbin/reboot\n::shutdown:/bin/umount -a -r\n",
-    )?;
+    ensure_os_release(&etc_dir, &manifest.target_distro)?;
+    ensure_standard_groups(&etc_dir)?;
+    let _ = configure_arch_mirrors_if_present(target_root);
+
+    // Only write BusyBox inittab when no systemd init is installed
+    let has_systemd = target_root.join("usr/lib/systemd/systemd").exists()
+        || target_root.join("lib/systemd/systemd").exists();
+    if !has_systemd {
+        fs::write(
+            etc_dir.join("inittab"),
+            "::sysinit:/bin/mount -o remount,rw /\n\
+             ::sysinit:/bin/mkdir -p /dev/pts /dev/shm /run\n\
+             ::sysinit:/bin/mount -t devpts devpts /dev/pts\n\
+             ::sysinit:/bin/mount -t tmpfs tmpfs /dev/shm\n\
+             ::sysinit:/bin/mount -a\n\
+             ::once:/bin/mdev -s\n\
+             tty1::respawn:/bin/sh -l\n\
+             ::ctrlaltdel:/sbin/reboot\n\
+             ::shutdown:/bin/umount -a -r\n",
+        )?;
+    }
 
     let username = if manifest.target_username.trim().is_empty() {
         "linuxuser"
@@ -319,10 +616,29 @@ where
 
     let welcome_sh = format!(
         "#!/bin/sh\n\
+         if [ -n \"$BIFROST_WELCOME_SHOWN\" ]; then return 0 2>/dev/null || exit 0; fi\n\
+         export BIFROST_WELCOME_SHOWN=1\n\
          clear 2>/dev/null || true\n\
          cat /etc/motd 2>/dev/null || true\n\
-         echo \"[Btrfs Mounts & Subvolumes]\"\n\
-         mount | grep -E 'btrfs|vfat' || df -h /\n\
+         if [ -f /etc/os-release ]; then\n\
+           OS_PRETTY=$(grep '^PRETTY_NAME=' /etc/os-release | head -n 1 | cut -d= -f2- | tr -d '\"')\n\
+           [ -n \"$OS_PRETTY\" ] && echo \"[Active OS]  $OS_PRETTY\"\n\
+         fi\n\
+         NET_IP=$(ip -4 -o addr show scope global 2>/dev/null | awk '{{print $2\": \"$4}}' | tr '\\n' ' ')\n\
+         if [ -n \"$NET_IP\" ]; then\n\
+           echo \"[Network]    $NET_IP\"\n\
+         else\n\
+           echo \"[Network]    Offline / Kein IPv4-Lease (manuell: udhcpc -i eth0)\"\n\
+         fi\n\
+         if command -v pacman >/dev/null 2>&1; then\n\
+           echo \"[Packages]   pacman bereit (Erststart: pacman-key --init && pacman-key --populate archlinux)\"\n\
+         elif command -v apk >/dev/null 2>&1; then\n\
+           echo \"[Packages]   apk bereit (z. B. apk update && apk add ...)\"\n\
+         fi\n\
+         echo \"[Optional]   Desktop installieren? -> bifrost-desktop\"\n\
+         echo \"\"\n\
+         echo \"[Mounts & Subvolumes]\"\n\
+         mount | grep -E 'btrfs|ext4|vfat' || df -h /\n\
          echo \"\"\n\
          echo \"[Migrated Files in /home/{username}]\"\n\
          ls -la /home/{username} 2>/dev/null || true\n\
@@ -339,7 +655,7 @@ where
 
     let etc_profile = etc_dir.join("profile");
     let existing_profile = fs::read_to_string(&etc_profile).unwrap_or_default();
-    if !existing_profile.contains("asgard_welcome.sh") {
+    if !existing_profile.contains("/etc/profile.d/") && !existing_profile.contains("asgard_welcome.sh") {
         let mut updated = existing_profile;
         updated.push_str("\nfor f in /etc/profile.d/*.sh; do [ -r \"$f\" ] && . \"$f\"; done\n");
         fs::write(&etc_profile, updated)?;
@@ -352,4 +668,63 @@ where
     fs::write(target_root.join(".bifrost_installed"), marker)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_configure_arch_mirrors_and_preserve_os_release() {
+        let tmp = std::env::temp_dir().join("bifrost_bootstrap_test_arch");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("etc/pacman.d")).unwrap();
+        fs::write(
+            tmp.join("etc/pacman.d/mirrorlist"),
+            "## Commented default mirrorlist\n#Server = https://example.org/$repo/os/$arch\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("etc/os-release"),
+            "NAME=\"Arch Linux\"\nPRETTY_NAME=\"Arch Linux\"\nID=arch\n",
+        )
+        .unwrap();
+
+        assert!(configure_arch_mirrors_if_present(&tmp).unwrap());
+        let ml = fs::read_to_string(tmp.join("etc/pacman.d/mirrorlist")).unwrap();
+        assert!(ml.contains("Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch"));
+
+        // Must preserve genuine extracted os-release instead of overwriting with fallback
+        ensure_os_release(&tmp.join("etc"), "Fedora 41").unwrap();
+        let osr = fs::read_to_string(tmp.join("etc/os-release")).unwrap();
+        assert_eq!(osr, "NAME=\"Arch Linux\"\nPRETTY_NAME=\"Arch Linux\"\nID=arch\n");
+
+        ensure_standard_groups(&tmp.join("etc")).unwrap();
+        let grp = fs::read_to_string(tmp.join("etc/group")).unwrap();
+        assert!(grp.contains("video:x:27:"));
+        assert!(grp.contains("input:x:101:"));
+        assert!(grp.contains("tty:x:5:"));
+
+        let helper = generate_desktop_helper_script();
+        assert!(helper.contains("pacman"));
+        assert!(helper.contains("apk"));
+        assert!(helper.contains("Abbrechen"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_fallback_os_release_respects_selected_distro() {
+        let tmp = std::env::temp_dir().join("bifrost_bootstrap_test_fedora");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("etc")).unwrap();
+
+        ensure_os_release(&tmp.join("etc"), "Fedora 41").unwrap();
+        let osr = fs::read_to_string(tmp.join("etc/os-release")).unwrap();
+        assert!(osr.contains("NAME=\"Fedora 41\""));
+        assert!(osr.contains("ID=fedora"));
+        assert!(!osr.contains("Arch Linux"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }

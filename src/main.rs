@@ -159,7 +159,13 @@ impl App {
 
             blueprint_focus: BlueprintFocus::Distro,
             selected_distro: 0,
-            distros: vec!["Arch Linux", "Fedora 41", "Debian 12", "NixOS"],
+            distros: vec![
+                "Arch Linux",
+                "Alpine Linux (Asgard Minimal)",
+                "Fedora 41",
+                "Debian 12",
+                "NixOS",
+            ],
             selected_fs: 0,
             filesystems: vec![
                 "Btrfs (@root, @home, @blackbox, zstd)",
@@ -283,7 +289,24 @@ impl App {
             );
 
             if let Ok(pack_res) = res {
-                if let Ok(handoff) = bridge::handoff::stage_vm_handoff(&user_prof, &pack_res) {
+                let progress_for_handoff = Arc::clone(&progress_arc);
+                if let Ok(handoff) = bridge::handoff::stage_vm_handoff_with_progress(
+                    &user_prof,
+                    &pack_res,
+                    |stage_msg| {
+                        if let Ok(mut lock) = progress_for_handoff.lock() {
+                            if let Some(p) = lock.as_mut() {
+                                p.current_file = stage_msg.to_string();
+                            } else {
+                                *lock = Some(PackProgress {
+                                    current_file: stage_msg.to_string(),
+                                    files_packed: pack_res.total_files,
+                                    bytes_processed: pack_res.uncompressed_bytes,
+                                });
+                            }
+                        }
+                    },
+                ) {
                     if let Ok(mut hlock) = handoff_arc.lock() {
                         *hlock = Some(handoff);
                     }
@@ -1380,7 +1403,19 @@ fn render_phase_blueprint(f: &mut Frame, area: Rect, block: Block, app: &App) {
         let check = if sw.will_reinstall { "[x] " } else { "[ ] " };
         let pointer = if is_cur { "▶ " } else { "  " };
 
-        let flatpak_label = sw.flatpak_id.as_deref().unwrap_or("native (pacman)");
+        let selected_distro_lc = app.distros[app.selected_distro].to_lowercase();
+        let native_pm_label = if selected_distro_lc.contains("alpine") {
+            "native (apk)"
+        } else if selected_distro_lc.contains("fedora") {
+            "native (dnf)"
+        } else if selected_distro_lc.contains("debian") {
+            "native (apt)"
+        } else if selected_distro_lc.contains("nixos") {
+            "native (nix)"
+        } else {
+            "native (pacman)"
+        };
+        let flatpak_label = sw.flatpak_id.as_deref().unwrap_or(native_pm_label);
 
         lines.push(Line::from(vec![
             Span::styled(pointer, Style::default().fg(C_ACCENT)),
@@ -1512,6 +1547,21 @@ fn render_phase_executing(f: &mut Frame, area: Rect, block: Block, app: &App) {
                             Style::default().fg(C_TEXT_BRIGHT),
                         ),
                     ]));
+
+                    if let Some(rootfs_path) = &h.rootfs_staged_path {
+                        lines.push(Line::from(vec![
+                            Span::styled(" [✓] Distro Rootfs: ", Style::default().fg(C_SUCCESS)),
+                            Span::styled(
+                                format!("{} ({})", h.rootfs_source, rootfs_path.display()),
+                                Style::default().fg(C_TEXT_BRIGHT),
+                            ),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![
+                            Span::styled(" [i] Distro Rootfs: ", Style::default().fg(C_ACCENT)),
+                            Span::styled(h.rootfs_source.clone(), Style::default().fg(C_TEXT_BRIGHT)),
+                        ]));
+                    }
 
                     if let Some(uki_path) = &h.uki_staged_path {
                         lines.push(Line::from(vec![

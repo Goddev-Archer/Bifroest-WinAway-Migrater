@@ -12,6 +12,47 @@ use crate::blackbox::PackResult;
 pub const UKI_FILENAME: &str = "bifrost-boot.efi";
 pub const UKI_RELEASE_URL: &str =
     "https://github.com/Goddev-Archer/Bifroest-WinAway-Migrater/releases/download/v0.1.0-experimental/bifrost-boot.efi";
+pub const ROOTFS_FILENAME: &str = "bifrost_rootfs.tar.zst";
+pub const ARCH_BOOTSTRAP_URLS: &[&str] = &[
+    "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst",
+    "http://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistroRootfsSpec {
+    pub distro_label: String,
+    pub download_urls: Vec<&'static str>,
+    pub use_embedded_asgard: bool,
+    pub min_expected_bytes: u64,
+}
+
+/// Resolves the rootfs staging strategy for the user's chosen distribution while preserving freedom of choice.
+pub fn resolve_distro_rootfs_spec(target_distro: &str) -> DistroRootfsSpec {
+    let lc = target_distro.to_lowercase();
+    if lc.contains("arch") {
+        DistroRootfsSpec {
+            distro_label: target_distro.to_string(),
+            download_urls: ARCH_BOOTSTRAP_URLS.to_vec(),
+            use_embedded_asgard: false,
+            min_expected_bytes: 10 * 1024 * 1024, // Arch bootstrap is ~120 MB
+        }
+    } else if lc.contains("alpine") || lc.contains("asgard") {
+        DistroRootfsSpec {
+            distro_label: target_distro.to_string(),
+            download_urls: Vec::new(),
+            use_embedded_asgard: true,
+            min_expected_bytes: 0,
+        }
+    } else {
+        // Fedora / Debian / NixOS / Custom: never force Arch; honor custom local bifrost_rootfs.tar.zst or fall back cleanly.
+        DistroRootfsSpec {
+            distro_label: target_distro.to_string(),
+            download_urls: Vec::new(),
+            use_embedded_asgard: true,
+            min_expected_bytes: 0,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffResult {
@@ -23,6 +64,8 @@ pub struct HandoffResult {
     pub bcd_commands: Vec<String>,
     pub esp_drive: String,
     pub uki_staged_path: Option<PathBuf>,
+    pub rootfs_staged_path: Option<PathBuf>,
+    pub rootfs_source: String,
     pub bcd_guid: Option<String>,
     pub bcd_armed: bool,
     pub secure_boot_enabled: bool,
@@ -197,6 +240,163 @@ pub fn ensure_uki_binary(stage_dir: &Path) -> io::Result<PathBuf> {
         io::ErrorKind::NotFound,
         format!("{UKI_FILENAME} nicht lokal vorhanden"),
     ))
+}
+
+/// Resolves or downloads the target distribution's rootfs archive into `stage_dir/bifrost_rootfs.tar.zst`.
+/// Honors user-supplied custom rootfs archives first, downloads official bootstrap images when chosen (e.g. Arch Linux),
+/// and cleanly falls back to the embedded Asgard base rootfs without ever forcing an unselected distro.
+pub fn ensure_distro_rootfs<F>(
+    user_profile: &Path,
+    stage_dir: &Path,
+    target_distro: &str,
+    log: &mut Vec<String>,
+    mut status_cb: F,
+) -> (Option<PathBuf>, String)
+where
+    F: FnMut(&str),
+{
+    let spec = resolve_distro_rootfs_spec(target_distro);
+    let dest = stage_dir.join(ROOTFS_FILENAME);
+    let marker = stage_dir.join("bifrost_rootfs.source");
+    let expected_marker = format!("auto:{}", spec.distro_label);
+
+    // Clear stale auto-downloaded rootfs if the user switched to a different target distro
+    if let Ok(prev_marker) = fs::read_to_string(&marker) {
+        if prev_marker.trim().starts_with("auto:") && prev_marker.trim() != expected_marker {
+            let _ = fs::remove_file(&dest);
+            let _ = fs::remove_file(&marker);
+            log.push(format!(
+                "Altes automatisches Rootfs ({}) entfernt, um neue Distro-Wahl ({target_distro}) zu respektieren.",
+                prev_marker.trim()
+            ));
+        }
+    }
+
+    // 1. Always honor an explicitly user-provided local bifrost_rootfs.tar.zst (maximum freedom of choice)
+    let mut local_candidates = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        local_candidates.push(cwd.join(ROOTFS_FILENAME));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            local_candidates.push(parent.join(ROOTFS_FILENAME));
+        }
+    }
+    local_candidates.push(user_profile.join(ROOTFS_FILENAME));
+    if !marker.exists() {
+        local_candidates.push(dest.clone());
+    }
+
+    for cand in local_candidates {
+        if let Ok(meta) = fs::metadata(&cand) {
+            if meta.is_file() && meta.len() > 0 {
+                if cand != dest {
+                    status_cb(&format!("Kopiere lokales Rootfs ({})...", cand.display()));
+                    if let Err(e) = fs::copy(&cand, &dest) {
+                        log.push(format!("[WARN] Kopieren des lokalen Rootfs fehlgeschlagen: {e}"));
+                        continue;
+                    }
+                }
+                let _ = fs::remove_file(&marker);
+                let sz_mb = meta.len() as f64 / (1024.0 * 1024.0);
+                let desc = format!("Benutzerdefiniertes lokales Rootfs ({sz_mb:.1} MB)");
+                log.push(format!("Rootfs bereit: {} [{desc}]", dest.display()));
+                return (Some(dest), desc);
+            }
+        }
+    }
+
+    // 2. If distro uses embedded Asgard rootfs (e.g. Alpine Minimal or distro without direct bootstrap URL)
+    if spec.use_embedded_asgard || spec.download_urls.is_empty() {
+        let desc = format!(
+            "Eingebettetes Asgard-Basis-Rootfs (apk + Auto-DHCP, fuer {target_distro})"
+        );
+        log.push(format!("Rootfs-Modus: {desc}"));
+        return (None, desc);
+    }
+
+    // 3. Reuse already auto-downloaded rootfs for the same distro if valid
+    if let Ok(meta) = fs::metadata(&dest) {
+        if meta.is_file() && meta.len() >= spec.min_expected_bytes {
+            let sz_mb = meta.len() as f64 / (1024.0 * 1024.0);
+            let desc = format!("Offizielles {target_distro} Bootstrap-Rootfs (gecached, {sz_mb:.1} MB)");
+            log.push(format!("Rootfs wiederverwendet: {} [{desc}]", dest.display()));
+            return (Some(dest), desc);
+        }
+    }
+
+    // 4. Download official distro bootstrap image on non-sandbox Windows hosts
+    if is_sandbox_profile(user_profile) {
+        let desc = format!("Sandbox-Modus: {target_distro} Rootfs-Download uebersprungen");
+        log.push(desc.clone());
+        return (None, desc);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        for url in &spec.download_urls {
+            status_cb(&format!("Lade {target_distro} Bootstrap-Rootfs ({url})..."));
+            let _ = fs::remove_file(&dest);
+
+            let curl_status = Command::new("curl.exe")
+                .args([
+                    "-fL",
+                    "--retry",
+                    "2",
+                    "--connect-timeout",
+                    "20",
+                    "-o",
+                    &dest.to_string_lossy(),
+                    url,
+                ])
+                .status();
+
+            let mut ok = curl_status.map(|s| s.success()).unwrap_or(false)
+                && fs::metadata(&dest)
+                    .map(|m| m.len() >= spec.min_expected_bytes)
+                    .unwrap_or(false);
+
+            if !ok {
+                let _ = fs::remove_file(&dest);
+                let ps_dest = dest.to_string_lossy().replace('\'', "''");
+                let ps_cmd = format!(
+                    "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{url}' -OutFile '{ps_dest}' -UseBasicParsing"
+                );
+                if let Ok(ps_out) = Command::new("powershell")
+                    .args(["-NoProfile", "-Command", &ps_cmd])
+                    .output()
+                {
+                    ok = ps_out.status.success()
+                        && fs::metadata(&dest)
+                            .map(|m| m.len() >= spec.min_expected_bytes)
+                            .unwrap_or(false);
+                }
+            }
+
+            if ok {
+                let sz_mb = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
+                let _ = fs::write(&marker, format!("{expected_marker}\n"));
+                let desc = format!("Offizielles {target_distro} Bootstrap-Rootfs ({sz_mb:.1} MB, pacman bereit)");
+                log.push(format!("Rootfs heruntergeladen: {} [{desc}]", dest.display()));
+                return (Some(dest), desc);
+            }
+            let _ = fs::remove_file(&dest);
+        }
+
+        let desc = format!(
+            "Offline-Fallback: Eingebettetes Asgard-Basis-Rootfs ({target_distro}-Download nicht erreichbar)"
+        );
+        log.push(format!("[WARN] {desc}"));
+        (None, desc)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = &mut status_cb;
+        let desc = format!("Eingebettetes Asgard-Basis-Rootfs ({target_distro})");
+        log.push(desc.clone());
+        (None, desc)
+    }
 }
 
 /// Builds active Windows commands to mount ESP, stage `bifrost-boot.efi`, and deploy to the UEFI boot path.
@@ -420,12 +620,24 @@ fn arm_windows_efi_handoff(
     (Some(uki_local), None, false)
 }
 
-/// Stages manifest, checksum verification, Windows EFI handoff script, and RAMFS runner for VM testing.
-/// On non-sandbox Windows hosts, also deploys the UKI binary to ESP and arms `bcdedit` automatically.
+/// Stages manifest, checksum verification, target distro rootfs, Windows EFI handoff script, and RAMFS runner.
+/// On non-sandbox Windows hosts, also deploys the UKI binary to ESP and arms UEFI boot handoff automatically.
 pub fn stage_vm_handoff(
     user_profile: &Path,
     pack_result: &PackResult,
 ) -> io::Result<HandoffResult> {
+    stage_vm_handoff_with_progress(user_profile, pack_result, |_| {})
+}
+
+/// Same as `stage_vm_handoff`, reporting live progress strings while staging rootfs and UEFI boot artifacts.
+pub fn stage_vm_handoff_with_progress<F>(
+    user_profile: &Path,
+    pack_result: &PackResult,
+    mut status_cb: F,
+) -> io::Result<HandoffResult>
+where
+    F: FnMut(&str),
+{
     let stage_dir = user_profile.join("bifrost_vm_stage");
     fs::create_dir_all(&stage_dir)?;
 
@@ -516,6 +728,17 @@ exec /bin/bifroest --ramfs --archive \"$ARCHIVE_RAM\" --target-root /mnt/target_
         status_log.push("[WARN] UEFI Secure Boot ist AKTIV (nicht signiertes UKI kann blockiert werden).".to_string());
     }
 
+    // Stage target distro rootfs (honoring user's choice & local custom rootfs)
+    let (rootfs_staged_path, rootfs_source) = ensure_distro_rootfs(
+        user_profile,
+        &stage_dir,
+        &staged_manifest.target_distro,
+        &mut status_log,
+        &mut status_cb,
+    );
+
+    status_cb("Stage UEFI Boot-Image (bifrost-boot.efi) & Boot-Handoff...");
+
     #[cfg(target_os = "windows")]
     let (uki_staged_path, bcd_guid, bcd_armed) = if is_sandbox_profile(user_profile) {
         status_log.push("Sandbox-Lauf erkannt: Live BCD/ESP Mutation übersprungen.".to_string());
@@ -539,6 +762,8 @@ exec /bin/bifroest --ramfs --archive \"$ARCHIVE_RAM\" --target-root /mnt/target_
         bcd_commands,
         esp_drive,
         uki_staged_path,
+        rootfs_staged_path,
+        rootfs_source,
         bcd_guid,
         bcd_armed,
         secure_boot_enabled,
@@ -589,5 +814,52 @@ mod tests {
         assert!(joined.contains("bootmgfw.efi"));
         assert!(joined.contains("bootx64.efi"));
         assert!(joined.contains("bcdedit /deletevalue {bootmgr} bootsequence"));
+    }
+
+    #[test]
+    fn test_resolve_distro_rootfs_spec_preserves_freedom_of_choice() {
+        let arch = resolve_distro_rootfs_spec("Arch Linux");
+        assert!(!arch.use_embedded_asgard);
+        assert!(!arch.download_urls.is_empty());
+        assert!(arch.download_urls[0].contains("archlinux-bootstrap-x86_64.tar.zst"));
+
+        let alpine = resolve_distro_rootfs_spec("Alpine Linux (Asgard Minimal)");
+        assert!(alpine.use_embedded_asgard);
+        assert!(alpine.download_urls.is_empty());
+
+        let fedora = resolve_distro_rootfs_spec("Fedora 41");
+        assert!(fedora.use_embedded_asgard);
+        assert!(fedora.download_urls.is_empty());
+    }
+
+    #[test]
+    fn test_ensure_distro_rootfs_honors_custom_local_archive_and_clears_stale_auto() {
+        let tmp = std::env::temp_dir().join("bifrost_handoff_rootfs_test");
+        let _ = fs::remove_dir_all(&tmp);
+        let stage = tmp.join("bifrost_vm_stage");
+        fs::create_dir_all(&stage).unwrap();
+
+        // Simulate stale auto-downloaded Arch rootfs when user switches to Alpine
+        fs::write(stage.join(ROOTFS_FILENAME), b"old-arch-data").unwrap();
+        fs::write(stage.join("bifrost_rootfs.source"), "auto:Arch Linux\n").unwrap();
+        let mut log = Vec::new();
+        let (path_alpine, _) = ensure_distro_rootfs(
+            &tmp,
+            &stage,
+            "Alpine Linux (Asgard Minimal)",
+            &mut log,
+            |_| {},
+        );
+        assert!(path_alpine.is_none());
+        assert!(!stage.join(ROOTFS_FILENAME).exists());
+
+        // Simulate explicit user-supplied custom rootfs in user_profile
+        fs::write(tmp.join(ROOTFS_FILENAME), b"custom-fedora-rootfs").unwrap();
+        let mut log2 = Vec::new();
+        let (path_custom, desc) = ensure_distro_rootfs(&tmp, &stage, "Fedora 41", &mut log2, |_| {});
+        assert_eq!(path_custom.as_deref(), Some(stage.join(ROOTFS_FILENAME).as_path()));
+        assert!(desc.contains("Benutzerdefiniertes"));
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

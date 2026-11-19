@@ -70,11 +70,18 @@ where
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
 
+    let archive_manifest = inject::read_manifest_from_archive(archive_path).ok();
     let clean_install = clean_install_override.unwrap_or_else(|| {
-        inject::read_manifest_from_archive(archive_path)
+        archive_manifest
+            .as_ref()
             .map(|m| m.clean_install)
             .unwrap_or(true)
     });
+    let target_filesystem = archive_manifest
+        .as_ref()
+        .map(|m| m.target_filesystem.clone())
+        .filter(|fs| !fs.trim().is_empty())
+        .unwrap_or_else(|| "Btrfs (@root, @home, @blackbox, zstd)".to_string());
 
     // Step 1/5: Discover disks & compute Clean-Install or Dual-Boot PartitionPlan
     step_cb("Ermittle Block-Devices & berechne Partitionsplan...", 1, TOTAL_STEPS);
@@ -143,14 +150,18 @@ where
         step_cb(cmd_msg, 2, TOTAL_STEPS);
     })?;
 
-    // Step 3/5: Format & create Btrfs subvolume layout + /etc/fstab
-    step_cb("Erstelle Btrfs Subvolumes (@root, @home, @blackbox) & fstab...", 3, TOTAL_STEPS);
+    // Step 3/5: Format & create target filesystem layout + /etc/fstab (honoring user's choice)
+    step_cb(
+        &format!("Erstelle Dateisystem-Layout ({target_filesystem}) & fstab..."),
+        3,
+        TOTAL_STEPS,
+    );
     std::fs::create_dir_all(target_root)?;
     setup_target_filesystems(
         target_root,
         &plan.new_linux_partition,
         &plan.efi_partition,
-        "Btrfs (@root, @home, @blackbox, zstd)",
+        &target_filesystem,
         dry_run,
         |fs_msg, _i, _t| {
             step_cb(fs_msg, 3, TOTAL_STEPS);

@@ -82,6 +82,10 @@ pub fn generate_fstab(
         ));
     }
 
+    out.push_str("\n# Pseudo-terminals (PTY) & POSIX shared memory for desktop terminals\n");
+    out.push_str("devpts /dev/pts devpts gid=5,mode=620 0 0\n");
+    out.push_str("tmpfs /dev/shm tmpfs defaults 0 0\n");
+
     out
 }
 
