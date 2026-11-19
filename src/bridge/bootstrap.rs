@@ -1,6 +1,7 @@
+use flate2::read::GzDecoder;
 use std::{
     fs::{self, File},
-    io::{self, BufReader},
+    io::{self, BufReader, Read},
     path::{Component, Path, PathBuf},
 };
 use tar::Archive;
@@ -117,7 +118,8 @@ fn sanitize_rootfs_rel_path(raw: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-/// Unpacks a compressed `.tar.zst` rootfs archive into `target_root` while preserving Btrfs `/etc/fstab`.
+/// Unpacks a compressed `.tar.zst` or `.tar.gz` rootfs archive (detected via magic bytes) into `target_root`
+/// while preserving `/etc/fstab`.
 fn extract_rootfs_archive<F>(
     rootfs: &Path,
     target_root: &Path,
@@ -127,9 +129,19 @@ fn extract_rootfs_archive<F>(
 where
     F: FnMut(&str, usize, usize),
 {
+    let mut magic = [0u8; 2];
+    {
+        let mut probe = File::open(rootfs)?;
+        let _ = probe.read(&mut magic)?;
+    }
+
     let f = File::open(rootfs)?;
-    let decoder = Decoder::new(BufReader::new(f))?;
-    let mut tar = Archive::new(decoder);
+    let reader: Box<dyn Read> = if magic == [0x1f, 0x8b] {
+        Box::new(GzDecoder::new(BufReader::new(f)))
+    } else {
+        Box::new(Decoder::new(BufReader::new(f))?)
+    };
+    let mut tar = Archive::new(reader);
     let mut files_count = 0usize;
 
     for entry_res in tar.entries()? {
@@ -299,6 +311,8 @@ fn ensure_os_release(etc_dir: &Path, target_distro: &str) -> io::Result<()> {
     let lc = target_distro.to_lowercase();
     let (id, id_like) = if lc.contains("arch") {
         ("arch", "archlinux")
+    } else if lc.contains("ubuntu") {
+        ("ubuntu", "debian")
     } else if lc.contains("fedora") {
         ("fedora", "rhel")
     } else if lc.contains("debian") {
@@ -376,11 +390,14 @@ echo \"======================================================================\"
 if command -v pacman >/dev/null 2>&1; then
   PM=\"pacman\"
   echo \"  Erkannter Paketmanager: pacman (Arch Linux)\"
+elif command -v apt-get >/dev/null 2>&1; then
+  PM=\"apt\"
+  echo \"  Erkannter Paketmanager: apt (Ubuntu / Debian)\"
 elif command -v apk >/dev/null 2>&1; then
   PM=\"apk\"
   echo \"  Erkannter Paketmanager: apk (Alpine / Asgard Minimal)\"
 else
-  echo \"  Kein unterstuetzter Paketmanager (pacman/apk) gefunden.\"
+  echo \"  Kein unterstuetzter Paketmanager (pacman/apt/apk) gefunden.\"
   exit 1
 fi
 
@@ -428,6 +445,31 @@ if [ \"$PM\" = \"pacman\" ]; then
     4)
       pacman -S --noconfirm hyprland kitty waybar wofi ttf-dejavu seatd
       echo \"[OK] Hyprland installiert! Starten mit: Hyprland\"
+      ;;
+    *)
+      echo \"Ungueltige Auswahl.\"
+      exit 1
+      ;;
+  esac
+elif [ \"$PM\" = \"apt\" ]; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  case \"$CHOICE\" in
+    1)
+      apt-get install -y xorg xinit xfce4 xfce4-terminal dbus-x11 fonts-dejavu
+      echo \"[OK] XFCE4 installiert! Starten mit: startx /usr/bin/startxfce4\"
+      ;;
+    2)
+      apt-get install -y kde-plasma-desktop konsole dbus-x11
+      echo \"[OK] KDE Plasma installiert!\"
+      ;;
+    3)
+      apt-get install -y ubuntu-desktop-minimal gnome-terminal
+      echo \"[OK] GNOME installiert!\"
+      ;;
+    4)
+      apt-get install -y sway foot dbus-x11 fonts-dejavu
+      echo \"[OK] Sway (Wayland Tiling) installiert!\"
       ;;
     *)
       echo \"Ungueltige Auswahl.\"
@@ -632,6 +674,8 @@ where
          fi\n\
          if command -v pacman >/dev/null 2>&1; then\n\
            echo \"[Packages]   pacman bereit (Erststart: pacman-key --init && pacman-key --populate archlinux)\"\n\
+         elif command -v apt-get >/dev/null 2>&1; then\n\
+           echo \"[Packages]   apt bereit (z. B. apt update && apt install ...)\"\n\
          elif command -v apk >/dev/null 2>&1; then\n\
            echo \"[Packages]   apk bereit (z. B. apk update && apk add ...)\"\n\
          fi\n\
@@ -724,6 +768,43 @@ mod tests {
         assert!(osr.contains("NAME=\"Fedora 41\""));
         assert!(osr.contains("ID=fedora"));
         assert!(!osr.contains("Arch Linux"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_extract_gzip_rootfs_and_ubuntu_support() {
+        use flate2::{write::GzEncoder, Compression};
+
+        let tmp = std::env::temp_dir().join("bifrost_bootstrap_test_ubuntu_gz");
+        let _ = fs::remove_dir_all(&tmp);
+        let target = tmp.join("target");
+        fs::create_dir_all(&target).unwrap();
+
+        let archive_path = tmp.join("bifrost_rootfs.tar.gz");
+        {
+            let gz_file = File::create(&archive_path).unwrap();
+            let enc = GzEncoder::new(gz_file, Compression::fast());
+            let mut builder = tar::Builder::new(enc);
+            let data = b"NAME=\"Ubuntu\"\nPRETTY_NAME=\"Ubuntu 26.04.1 LTS\"\nID=ubuntu\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, "etc/os-release", &data[..]).unwrap();
+            builder.finish().unwrap();
+        }
+
+        let count = extract_rootfs_archive(&archive_path, &target, 4, &mut |_, _, _| {}).unwrap();
+        assert_eq!(count, 1);
+
+        ensure_os_release(&target.join("etc"), "Ubuntu 26.04 LTS").unwrap();
+        let osr = fs::read_to_string(target.join("etc/os-release")).unwrap();
+        assert!(osr.contains("Ubuntu 26.04.1 LTS"));
+        assert!(osr.contains("ID=ubuntu"));
+
+        let helper = generate_desktop_helper_script();
+        assert!(helper.contains("apt-get"));
 
         let _ = fs::remove_dir_all(&tmp);
     }

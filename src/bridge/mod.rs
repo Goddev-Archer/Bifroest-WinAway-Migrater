@@ -194,6 +194,7 @@ where
     step_cb("Entpacke Linux-Rootfs & deploye systemd-boot...", 5, TOTAL_STEPS);
     let rootfs_opt = [
         Path::new("/tmp/bifrost_rootfs.tar.zst"),
+        Path::new("/tmp/bifrost_rootfs.tar.gz"),
         Path::new("/usr/share/bifrost/base-rootfs.tar.zst"),
     ]
     .into_iter()

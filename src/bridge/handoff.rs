@@ -13,17 +13,24 @@ pub const UKI_FILENAME: &str = "bifrost-boot.efi";
 pub const UKI_RELEASE_URL: &str =
     "https://github.com/Goddev-Archer/Bifroest-WinAway-Migrater/releases/download/v0.1.0-experimental/bifrost-boot.efi";
 pub const ROOTFS_FILENAME: &str = "bifrost_rootfs.tar.zst";
+pub const ROOTFS_GZ_FILENAME: &str = "bifrost_rootfs.tar.gz";
 pub const ARCH_BOOTSTRAP_URLS: &[&str] = &[
     "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst",
     "http://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst",
+];
+pub const UBUNTU_2604_BASE_URLS: &[&str] = &[
+    "https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/ubuntu-base-26.04.1-base-amd64.tar.gz",
+    "https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/ubuntu-base-26.04-base-amd64.tar.gz",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DistroRootfsSpec {
     pub distro_label: String,
+    pub archive_filename: &'static str,
     pub download_urls: Vec<&'static str>,
     pub use_embedded_asgard: bool,
     pub min_expected_bytes: u64,
+    pub native_pm: &'static str,
 }
 
 /// Resolves the rootfs staging strategy for the user's chosen distribution while preserving freedom of choice.
@@ -32,24 +39,39 @@ pub fn resolve_distro_rootfs_spec(target_distro: &str) -> DistroRootfsSpec {
     if lc.contains("arch") {
         DistroRootfsSpec {
             distro_label: target_distro.to_string(),
+            archive_filename: ROOTFS_FILENAME,
             download_urls: ARCH_BOOTSTRAP_URLS.to_vec(),
             use_embedded_asgard: false,
             min_expected_bytes: 10 * 1024 * 1024, // Arch bootstrap is ~120 MB
+            native_pm: "pacman",
+        }
+    } else if lc.contains("ubuntu") {
+        DistroRootfsSpec {
+            distro_label: target_distro.to_string(),
+            archive_filename: ROOTFS_GZ_FILENAME,
+            download_urls: UBUNTU_2604_BASE_URLS.to_vec(),
+            use_embedded_asgard: false,
+            min_expected_bytes: 10 * 1024 * 1024, // Ubuntu 26.04 LTS base is ~35 MB
+            native_pm: "apt",
         }
     } else if lc.contains("alpine") || lc.contains("asgard") {
         DistroRootfsSpec {
             distro_label: target_distro.to_string(),
+            archive_filename: ROOTFS_FILENAME,
             download_urls: Vec::new(),
             use_embedded_asgard: true,
             min_expected_bytes: 0,
+            native_pm: "apk",
         }
     } else {
-        // Fedora / Debian / NixOS / Custom: never force Arch; honor custom local bifrost_rootfs.tar.zst or fall back cleanly.
+        // Fedora / Debian / NixOS / Custom: never force another distro; honor custom local rootfs or fall back cleanly.
         DistroRootfsSpec {
             distro_label: target_distro.to_string(),
+            archive_filename: ROOTFS_FILENAME,
             download_urls: Vec::new(),
             use_embedded_asgard: true,
             min_expected_bytes: 0,
+            native_pm: "apk",
         }
     }
 }
@@ -256,14 +278,17 @@ where
     F: FnMut(&str),
 {
     let spec = resolve_distro_rootfs_spec(target_distro);
-    let dest = stage_dir.join(ROOTFS_FILENAME);
+    let dest = stage_dir.join(spec.archive_filename);
+    let dest_zst = stage_dir.join(ROOTFS_FILENAME);
+    let dest_gz = stage_dir.join(ROOTFS_GZ_FILENAME);
     let marker = stage_dir.join("bifrost_rootfs.source");
     let expected_marker = format!("auto:{}", spec.distro_label);
 
     // Clear stale auto-downloaded rootfs if the user switched to a different target distro
     if let Ok(prev_marker) = fs::read_to_string(&marker) {
         if prev_marker.trim().starts_with("auto:") && prev_marker.trim() != expected_marker {
-            let _ = fs::remove_file(&dest);
+            let _ = fs::remove_file(&dest_zst);
+            let _ = fs::remove_file(&dest_gz);
             let _ = fs::remove_file(&marker);
             log.push(format!(
                 "Altes automatisches Rootfs ({}) entfernt, um neue Distro-Wahl ({target_distro}) zu respektieren.",
@@ -272,27 +297,29 @@ where
         }
     }
 
-    // 1. Always honor an explicitly user-provided local bifrost_rootfs.tar.zst (maximum freedom of choice)
+    // 1. Always honor an explicitly user-provided local bifrost_rootfs.tar.zst or .tar.gz (maximum freedom of choice)
     let mut local_candidates = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        local_candidates.push(cwd.join(ROOTFS_FILENAME));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            local_candidates.push(parent.join(ROOTFS_FILENAME));
+    for fname in [ROOTFS_FILENAME, ROOTFS_GZ_FILENAME] {
+        if let Ok(cwd) = std::env::current_dir() {
+            local_candidates.push((cwd.join(fname), stage_dir.join(fname)));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                local_candidates.push((parent.join(fname), stage_dir.join(fname)));
+            }
+        }
+        local_candidates.push((user_profile.join(fname), stage_dir.join(fname)));
+        if !marker.exists() {
+            local_candidates.push((stage_dir.join(fname), stage_dir.join(fname)));
         }
     }
-    local_candidates.push(user_profile.join(ROOTFS_FILENAME));
-    if !marker.exists() {
-        local_candidates.push(dest.clone());
-    }
 
-    for cand in local_candidates {
+    for (cand, target_dest) in local_candidates {
         if let Ok(meta) = fs::metadata(&cand) {
             if meta.is_file() && meta.len() > 0 {
-                if cand != dest {
+                if cand != target_dest {
                     status_cb(&format!("Kopiere lokales Rootfs ({})...", cand.display()));
-                    if let Err(e) = fs::copy(&cand, &dest) {
+                    if let Err(e) = fs::copy(&cand, &target_dest) {
                         log.push(format!("[WARN] Kopieren des lokalen Rootfs fehlgeschlagen: {e}"));
                         continue;
                     }
@@ -300,8 +327,8 @@ where
                 let _ = fs::remove_file(&marker);
                 let sz_mb = meta.len() as f64 / (1024.0 * 1024.0);
                 let desc = format!("Benutzerdefiniertes lokales Rootfs ({sz_mb:.1} MB)");
-                log.push(format!("Rootfs bereit: {} [{desc}]", dest.display()));
-                return (Some(dest), desc);
+                log.push(format!("Rootfs bereit: {} [{desc}]", target_dest.display()));
+                return (Some(target_dest), desc);
             }
         }
     }
@@ -319,7 +346,10 @@ where
     if let Ok(meta) = fs::metadata(&dest) {
         if meta.is_file() && meta.len() >= spec.min_expected_bytes {
             let sz_mb = meta.len() as f64 / (1024.0 * 1024.0);
-            let desc = format!("Offizielles {target_distro} Bootstrap-Rootfs (gecached, {sz_mb:.1} MB)");
+            let desc = format!(
+                "Offizielles {target_distro} Rootfs (gecached, {sz_mb:.1} MB, {} bereit)",
+                spec.native_pm
+            );
             log.push(format!("Rootfs wiederverwendet: {} [{desc}]", dest.display()));
             return (Some(dest), desc);
         }
@@ -376,7 +406,10 @@ where
             if ok {
                 let sz_mb = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
                 let _ = fs::write(&marker, format!("{expected_marker}\n"));
-                let desc = format!("Offizielles {target_distro} Bootstrap-Rootfs ({sz_mb:.1} MB, pacman bereit)");
+                let desc = format!(
+                    "Offizielles {target_distro} Rootfs ({sz_mb:.1} MB, {} bereit)",
+                    spec.native_pm
+                );
                 log.push(format!("Rootfs heruntergeladen: {} [{desc}]", dest.display()));
                 return (Some(dest), desc);
             }
@@ -820,8 +853,17 @@ mod tests {
     fn test_resolve_distro_rootfs_spec_preserves_freedom_of_choice() {
         let arch = resolve_distro_rootfs_spec("Arch Linux");
         assert!(!arch.use_embedded_asgard);
+        assert_eq!(arch.archive_filename, ROOTFS_FILENAME);
+        assert_eq!(arch.native_pm, "pacman");
         assert!(!arch.download_urls.is_empty());
         assert!(arch.download_urls[0].contains("archlinux-bootstrap-x86_64.tar.zst"));
+
+        let ubuntu = resolve_distro_rootfs_spec("Ubuntu 26.04 LTS");
+        assert!(!ubuntu.use_embedded_asgard);
+        assert_eq!(ubuntu.archive_filename, ROOTFS_GZ_FILENAME);
+        assert_eq!(ubuntu.native_pm, "apt");
+        assert!(!ubuntu.download_urls.is_empty());
+        assert!(ubuntu.download_urls[0].contains("ubuntu-base-26.04"));
 
         let alpine = resolve_distro_rootfs_spec("Alpine Linux (Asgard Minimal)");
         assert!(alpine.use_embedded_asgard);

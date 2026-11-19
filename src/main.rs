@@ -161,6 +161,7 @@ impl App {
             selected_distro: 0,
             distros: vec![
                 "Arch Linux",
+                "Ubuntu 26.04 LTS",
                 "Alpine Linux (Asgard Minimal)",
                 "Fedora 41",
                 "Debian 12",
@@ -1408,7 +1409,7 @@ fn render_phase_blueprint(f: &mut Frame, area: Rect, block: Block, app: &App) {
             "native (apk)"
         } else if selected_distro_lc.contains("fedora") {
             "native (dnf)"
-        } else if selected_distro_lc.contains("debian") {
+        } else if selected_distro_lc.contains("debian") || selected_distro_lc.contains("ubuntu") {
             "native (apt)"
         } else if selected_distro_lc.contains("nixos") {
             "native (nix)"

@@ -354,13 +354,17 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
         cp "$FOUND" "$ARCHIVE_RAM"
         WIN_PART="$part"
 
-        FOUND_ROOTFS=$(find /mnt/win_src -maxdepth 5 \( -iname "bifrost_rootfs.tar.zst" -o -iname "archlinux-bootstrap*.tar.zst" \) 2>/dev/null | head -n 1 || true)
+        FOUND_ROOTFS=$(find /mnt/win_src -maxdepth 5 \( -iname "bifrost_rootfs.tar.zst" -o -iname "bifrost_rootfs.tar.gz" -o -iname "archlinux-bootstrap*.tar.zst" -o -iname "ubuntu-base*.tar.gz" \) 2>/dev/null | head -n 1 || true)
         if [ -n "$FOUND_ROOTFS" ]; then
+          ROOTFS_DEST="$ROOTFS_RAM"
+          case "$FOUND_ROOTFS" in
+            *.tar.gz|*.tgz) ROOTFS_DEST="/tmp/bifrost_rootfs.tar.gz" ;;
+          esac
           ROOTFS_KB=$(du -k "$FOUND_ROOTFS" 2>/dev/null | awk '{print $1}')
           TMP_AVAIL_KB=$(df -k /tmp 2>/dev/null | tail -n 1 | awk '{print $4}')
           if [ -n "$ROOTFS_KB" ] && [ -n "$TMP_AVAIL_KB" ] && [ "$TMP_AVAIL_KB" -gt "$((ROOTFS_KB + 32768))" ]; then
-            kmsg_log "Staged Linux Rootfs gefunden: $FOUND_ROOTFS -> RAM ($ROOTFS_RAM)"
-            cp "$FOUND_ROOTFS" "$ROOTFS_RAM" || rm -f "$ROOTFS_RAM"
+            kmsg_log "Staged Linux Rootfs gefunden: $FOUND_ROOTFS -> RAM ($ROOTFS_DEST)"
+            cp "$FOUND_ROOTFS" "$ROOTFS_DEST" || rm -f "$ROOTFS_DEST"
           else
             kmsg_log "[WARN] Zu wenig RAM in /tmp (${TMP_AVAIL_KB:-0} KB) fuer Rootfs (${ROOTFS_KB:-0} KB) - nutze eingebettetes Asgard-Rootfs."
           fi
