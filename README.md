@@ -92,10 +92,10 @@ During early-boot transit, Bifröst takes over the display to provide real-time 
  \ \_____\  \ \_\ \_\  \ \_\  \ \____-  \ \_____\  \ \_____\ 
   \/_____/   \/_/ /_/   \/_/   \/____/   \/_____/   \/_____/ 
 
-╔══════════════════════════ ⚡ BIFRÖST CONTINUUM ⚡ ══════════════════════════╗
+╔══════════════════════════ ⚡ BIFRÖST CONTINUUM ⚡ ═════════════════════════╗
 ║ [ MIDGARD / WIN11 ] ╒══─══─══─══─══─══─══─══─══╕ [ ASGARD / LINUX ]         ║
-║   NTFS Volume       │»»»»»» [■ BLACKBOX] »»»»»│   Btrfs Subvols            ║
-║     (Source)        ╘══─══─══─══─══─══─══─══─══╛     (Target)              ║
+║   NTFS Volume       │»»»»»» [■ BLACKBOX] »»»»»»│   Btrfs Subvols            ║
+║     (Source)        ╘══─══─══─══─══─══─══─══─══╛     (Target)               ║
 ╚═════════════════════════════════════════════════════════════════════════════╝
 ```
 
