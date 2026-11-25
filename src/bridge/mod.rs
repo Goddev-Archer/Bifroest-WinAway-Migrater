@@ -308,6 +308,10 @@ mod tests {
         assert_eq!(determine_posix_mode(".ssh/id_ed25519.pub", false), 0o644);
         assert_eq!(determine_posix_mode(".ssh/config", false), 0o644);
         assert_eq!(determine_posix_mode(".gnupg/trustdb.gpg", false), 0o600);
+        assert_eq!(determine_posix_mode(".config/gh", true), 0o700);
+        assert_eq!(determine_posix_mode(".config/gh/hosts.yml", false), 0o600);
+        assert_eq!(determine_posix_mode(".git-credentials", false), 0o600);
+        assert_eq!(determine_posix_mode(".gitconfig", false), 0o644);
         assert_eq!(determine_posix_mode("Documents/notes.txt", false), 0o644);
     }
 
@@ -320,14 +324,21 @@ mod tests {
 
         let ssh_dir = win_prof.join(".ssh");
         let docs_dir = win_prof.join("Documents");
+        let gh_dir = win_prof.join("AppData").join("Roaming").join("GitHub CLI");
+        let gitconfig_file = win_prof.join(".gitconfig");
+        let git_creds_file = win_prof.join(".git-credentials");
         let repo_dir = win_prof.join("dev").join("DemoApp");
         fs::create_dir_all(&ssh_dir).unwrap();
         fs::create_dir_all(&docs_dir).unwrap();
+        fs::create_dir_all(&gh_dir).unwrap();
         fs::create_dir_all(repo_dir.join(".git")).unwrap();
 
         fs::write(ssh_dir.join("id_ed25519"), "PRIVATE-KEY-CONTENT").unwrap();
         fs::write(ssh_dir.join("id_ed25519.pub"), "ssh-ed25519 AAAAC3Nza test").unwrap();
         fs::write(docs_dir.join("report.txt"), "Migration report content").unwrap();
+        fs::write(gh_dir.join("hosts.yml"), "github.com:\n  user: demo\n").unwrap();
+        fs::write(&gitconfig_file, "[user]\n\tname = Demo\n").unwrap();
+        fs::write(&git_creds_file, "https://demo:token@github.com\n").unwrap();
         fs::write(repo_dir.join("README.md"), "# DemoApp\n").unwrap();
 
         let candidates = vec![
@@ -350,6 +361,39 @@ mod tests {
                 total_bytes: 24,
                 size_human: "24 B".to_string(),
                 category: CandidateCategory::Documents,
+                selected: true,
+                item_count: 1,
+            },
+            CandidateItem {
+                id: "gitconfig".to_string(),
+                path: gitconfig_file,
+                display_name: "~/.gitconfig".to_string(),
+                description: "Git config".to_string(),
+                total_bytes: 20,
+                size_human: "20 B".to_string(),
+                category: CandidateCategory::ApplicationConfig,
+                selected: true,
+                item_count: 1,
+            },
+            CandidateItem {
+                id: "git_credentials".to_string(),
+                path: git_creds_file,
+                display_name: "~/.git-credentials".to_string(),
+                description: "Git creds".to_string(),
+                total_bytes: 32,
+                size_human: "32 B".to_string(),
+                category: CandidateCategory::Credentials,
+                selected: true,
+                item_count: 1,
+            },
+            CandidateItem {
+                id: "gh_cli".to_string(),
+                path: gh_dir,
+                display_name: "%APPDATA%\\GitHub CLI".to_string(),
+                description: "GitHub CLI".to_string(),
+                total_bytes: 26,
+                size_human: "26 B".to_string(),
+                category: CandidateCategory::Credentials,
                 selected: true,
                 item_count: 1,
             },
@@ -402,6 +446,9 @@ mod tests {
         assert!(summary.bootloader_entry_path.exists());
         assert!(summary.postinstall_script_path.exists());
         assert!(target_root.join("home/tester/.ssh/id_ed25519").exists());
+        assert!(target_root.join("home/tester/.gitconfig").exists());
+        assert!(target_root.join("home/tester/.git-credentials").exists());
+        assert!(target_root.join("home/tester/.config/gh/hosts.yml").exists());
         assert!(target_root.join("home/tester/Projects/DemoApp/README.md").exists());
 
         let has_ssh_dir_700 = summary
@@ -414,8 +461,20 @@ mod tests {
             .permission_fixes
             .iter()
             .any(|(p, m)| p.ends_with("id_ed25519") && *m == 0o600);
+        let has_gh_600 = summary
+            .injection
+            .permission_fixes
+            .iter()
+            .any(|(p, m)| p.ends_with("hosts.yml") && *m == 0o600);
+        let has_git_creds_600 = summary
+            .injection
+            .permission_fixes
+            .iter()
+            .any(|(p, m)| p.ends_with(".git-credentials") && *m == 0o600);
         assert!(has_ssh_dir_700, "Expected 0o700 fix recorded for .ssh");
         assert!(has_key_600, "Expected 0o600 fix recorded for id_ed25519");
+        assert!(has_gh_600, "Expected 0o600 fix recorded for gh hosts.yml");
+        assert!(has_git_creds_600, "Expected 0o600 fix recorded for .git-credentials");
 
         let _ = fs::remove_dir_all(&base_tmp);
     }

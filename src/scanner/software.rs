@@ -3,6 +3,9 @@ use std::{
     path::Path,
 };
 
+#[cfg(target_os = "windows")]
+use std::{env, path::PathBuf};
+
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::process::Command;
 
@@ -77,6 +80,13 @@ const EXTENDED_CATALOG: &[CatalogEntry] = &[
         winget_keywords: &["github.githubdesktop", "github desktop"],
         flatpak_id: Some("io.github.shifteight.desktop"),
         native_pkg: Some("github-desktop-bin"),
+    },
+    CatalogEntry {
+        name: "GitHub CLI",
+        id: "GitHub.cli",
+        winget_keywords: &["github.cli", "github cli", "github-cli"],
+        flatpak_id: None,
+        native_pkg: Some("gh"),
     },
     CatalogEntry {
         name: "Git",
@@ -319,6 +329,145 @@ pub fn parse_flatpak_app_list(raw_tsv: &str) -> Vec<DiscoveredSoftware> {
     apps
 }
 
+fn catalog_entry_to_software(entry: &CatalogEntry, source: &str) -> DiscoveredSoftware {
+    DiscoveredSoftware {
+        name: entry.name.to_string(),
+        id: entry.id.to_string(),
+        source: source.to_string(),
+        flatpak_id: entry.flatpak_id.map(|s| s.to_string()),
+        native_pkg: entry.native_pkg.map(|s| s.to_string()),
+        will_reinstall: true,
+    }
+}
+
+/// Parses `reg.exe query ... /s /v DisplayName` stdout into trimmed lowercase display names.
+pub fn parse_windows_registry_display_names(raw: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let Some(after_key) = trimmed.strip_prefix("DisplayName") else {
+            continue;
+        };
+        let rest = after_key.trim_start();
+        let val = if let Some(v) = rest.strip_prefix("REG_SZ") {
+            v
+        } else if let Some(v) = rest.strip_prefix("REG_EXPAND_SZ") {
+            v
+        } else {
+            continue;
+        };
+        let clean = val.trim().to_ascii_lowercase();
+        if !clean.is_empty() {
+            names.push(clean);
+        }
+    }
+    names
+}
+
+fn match_registry_display_name(entry: &CatalogEntry, dn: &str) -> bool {
+    match entry.id {
+        "Git.Git" => {
+            dn == "git" || dn.starts_with("git ") || dn.starts_with("git for windows")
+        }
+        "GitHub.cli" => dn == "gh" || dn.contains("github cli"),
+        "GitHub.GitHubDesktop" => dn.contains("github desktop"),
+        "Microsoft.VisualStudioCode" => dn.contains("visual studio code"),
+        "Valve.Steam" => dn == "steam" || dn.starts_with("steam "),
+        "Element.Element" => {
+            dn == "element" || dn.starts_with("element ") || dn.contains("element desktop")
+        }
+        "Brave.Brave" => dn.contains("brave"),
+        "Mozilla.Firefox" => dn.contains("mozilla firefox") || dn == "firefox",
+        "VideoLAN.VLC" => dn.contains("vlc media player") || dn == "vlc",
+        "Governikus.AusweisApp" => dn.contains("ausweisapp"),
+        "Cloudflare.Warp" => dn.contains("cloudflare warp") || dn.contains("cloudflare one"),
+        _ => dn.contains(&entry.name.to_ascii_lowercase()),
+    }
+}
+
+/// Matches lowercase Windows Uninstall Registry DisplayNames against `EXTENDED_CATALOG`.
+pub fn match_windows_registry_catalog(display_names_lc: &[String]) -> Vec<DiscoveredSoftware> {
+    let mut found = Vec::new();
+    let mut seen_ids = HashSet::new();
+    for entry in EXTENDED_CATALOG {
+        if display_names_lc
+            .iter()
+            .any(|dn| match_registry_display_name(entry, dn))
+            && seen_ids.insert(entry.id)
+        {
+            found.push(catalog_entry_to_software(entry, "Windows Uninstall Registry"));
+        }
+    }
+    found
+}
+
+#[cfg(target_os = "windows")]
+fn binary_in_path_env(bin_name: &str) -> bool {
+    let Some(path_var) = env::var_os("PATH") else {
+        return false;
+    };
+    env::split_paths(&path_var).any(|dir| dir.join(bin_name).is_file())
+}
+
+#[cfg(target_os = "windows")]
+fn where_finds_binary(bin_name: &str) -> bool {
+    Command::new("where.exe")
+        .arg(bin_name)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn find_catalog_entry(id: &str) -> Option<&'static CatalogEntry> {
+    EXTENDED_CATALOG.iter().find(|e| e.id == id)
+}
+
+#[cfg(target_os = "windows")]
+fn scan_windows_cli_and_paths(
+    user_profile: &Path,
+    seen_ids: &mut HashSet<String>,
+    found: &mut Vec<DiscoveredSoftware>,
+) {
+    let pf = env::var_os("ProgramFiles").map(PathBuf::from);
+    let pf86 = env::var_os("ProgramFiles(x86)").map(PathBuf::from);
+    let local_programs = user_profile.join("AppData").join("Local").join("Programs");
+    let scoop_shims = user_profile.join("scoop").join("shims");
+
+    let mut roots: Vec<PathBuf> = vec![local_programs, scoop_shims.clone()];
+    if let Some(p) = pf {
+        roots.push(p);
+    }
+    if let Some(p) = pf86 {
+        roots.push(p);
+    }
+
+    let cli_checks: &[(&str, &str, &[&str])] = &[
+        ("Git.Git", "git.exe", &["Git\\cmd\\git.exe", "Git\\bin\\git.exe", "git.exe"]),
+        ("GitHub.cli", "gh.exe", &["GitHub CLI\\gh.exe", "GitHub CLI\\bin\\gh.exe", "gh.exe"]),
+        ("Microsoft.VisualStudioCode", "code.cmd", &["Microsoft VS Code\\Code.exe", "Microsoft VS Code\\bin\\code.cmd"]),
+    ];
+
+    for &(catalog_id, path_bin, rel_candidates) in cli_checks {
+        if seen_ids.contains(catalog_id) {
+            continue;
+        }
+        let path_hit = binary_in_path_env(path_bin) || where_finds_binary(path_bin);
+        let disk_hit = !path_hit
+            && roots.iter().any(|root| {
+                rel_candidates
+                    .iter()
+                    .any(|rel| root.join(rel).is_file())
+            });
+        if path_hit || disk_hit {
+            if let Some(entry) = find_catalog_entry(catalog_id) {
+                seen_ids.insert(catalog_id.to_string());
+                found.push(catalog_entry_to_software(entry, "Windows PATH / Install-Pfad"));
+            }
+        }
+    }
+}
+
 pub fn scan_installed_software(user_profile: &Path) -> Vec<DiscoveredSoftware> {
     let mut found = Vec::new();
     let mut seen_ids = HashSet::new();
@@ -333,26 +482,42 @@ pub fn scan_installed_software(user_profile: &Path) -> Vec<DiscoveredSoftware> {
             let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
 
             for entry in EXTENDED_CATALOG {
-                let mut matched = false;
-                for kw in entry.winget_keywords {
-                    if stdout.contains(kw) {
-                        matched = true;
-                        break;
-                    }
-                }
-
+                let matched = entry.winget_keywords.iter().any(|kw| stdout.contains(kw));
                 if matched && seen_ids.insert(entry.id.to_string()) {
-                    found.push(DiscoveredSoftware {
-                        name: entry.name.to_string(),
-                        id: entry.id.to_string(),
-                        source: "Winget Package Database".to_string(),
-                        flatpak_id: entry.flatpak_id.map(|s| s.to_string()),
-                        native_pkg: entry.native_pkg.map(|s| s.to_string()),
-                        will_reinstall: true,
-                    });
+                    found.push(catalog_entry_to_software(entry, "Winget Package Database"));
                 }
             }
         }
+    }
+
+    // 1a. Windows Uninstall Registry + CLI PATH / Standardpfad-Fallback (z.B. Git, GitHub CLI)
+    #[cfg(target_os = "windows")]
+    {
+        let reg_keys = [
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        ];
+        let mut all_display_names = Vec::new();
+        for key in reg_keys {
+            if let Ok(out) = Command::new("reg.exe")
+                .args(["query", key, "/s", "/v", "DisplayName"])
+                .output()
+            {
+                if out.status.success() {
+                    all_display_names.extend(parse_windows_registry_display_names(
+                        &String::from_utf8_lossy(&out.stdout),
+                    ));
+                }
+            }
+        }
+        for sw in match_windows_registry_catalog(&all_display_names) {
+            if seen_ids.insert(sw.id.clone()) {
+                found.push(sw);
+            }
+        }
+
+        scan_windows_cli_and_paths(user_profile, &mut seen_ids, &mut found);
     }
 
     // 1b. Scan via Flatpak & native Linux package managers (pacman / apt / dnf)
@@ -448,9 +613,10 @@ mod tests {
 
     #[test]
     fn test_linux_software_and_flatpak_parsers() {
-        let native_out = "git\nneovim\nfirefox\nlibssl3\nbrave-browser\ntmux\n";
+        let native_out = "git\ngithub-cli\nneovim\nfirefox\nlibssl3\nbrave-browser\ntmux\n";
         let pkgs = parse_linux_native_packages(native_out, "APT Manual DB");
         assert!(pkgs.iter().any(|p| p.id == "Git.Git"));
+        assert!(pkgs.iter().any(|p| p.id == "GitHub.cli"));
         assert!(pkgs.iter().any(|p| p.id == "Mozilla.Firefox"));
         assert!(pkgs.iter().any(|p| p.id == "Brave.Brave"));
         assert!(pkgs.iter().any(|p| p.name == "neovim" && p.native_pkg.as_deref() == Some("neovim")));
@@ -462,5 +628,32 @@ mod tests {
         assert_eq!(fps.len(), 2);
         assert_eq!(fps[0].flatpak_id.as_deref(), Some("com.visualstudio.code"));
         assert_eq!(fps[1].name, "Obsidian");
+    }
+
+    #[test]
+    fn test_windows_registry_display_name_parsing_and_matching() {
+        let reg_out = "\
+HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Git_is1
+    DisplayName    REG_SZ    Git version 2.47.1
+
+HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GitHubCLI_is1
+    DisplayName    REG_SZ    GitHub CLI 2.63.0
+
+HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Logitech
+    DisplayName    REG_SZ    Logitech G HUB
+
+HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Codec
+    DisplayName    REG_SZ    Unicode Codec Pack
+
+HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\VSCode
+    DisplayName    REG_SZ    Microsoft Visual Studio Code (User)
+";
+        let names = parse_windows_registry_display_names(reg_out);
+        assert_eq!(names.len(), 5);
+        let matched = match_windows_registry_catalog(&names);
+        assert!(matched.iter().any(|m| m.id == "Git.Git" && m.native_pkg.as_deref() == Some("git")));
+        assert!(matched.iter().any(|m| m.id == "GitHub.cli" && m.native_pkg.as_deref() == Some("gh")));
+        assert!(matched.iter().any(|m| m.id == "Microsoft.VisualStudioCode"));
+        assert_eq!(matched.len(), 3);
     }
 }

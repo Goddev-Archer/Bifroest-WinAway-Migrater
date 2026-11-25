@@ -1235,7 +1235,7 @@ fn render_phase_diagnostics(f: &mut Frame, area: Rect, block: Block, app: &App) 
 
     lines.push(Line::from(vec![
         Span::styled(" [✓] Erkannte Anwendungen:     ", Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{} Programme für Flatpak-Migration identifiziert", app.software.len()), Style::default().fg(C_TEXT_BRIGHT)),
+        Span::styled(format!("{} Programme für Reinstallation identifiziert", app.software.len()), Style::default().fg(C_TEXT_BRIGHT)),
     ]));
 
     lines.push(Line::from(""));
@@ -1475,7 +1475,7 @@ fn render_phase_flightplan(f: &mut Frame, area: Rect, block: Block, app: &App) {
         Span::styled(format!("{selected_repos_count} von {} Repositories markiert", app.git_repos.len()), Style::default().fg(C_TEXT_BRIGHT)),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(" • Flatpak Apps:         ", Style::default().fg(C_MUTED)),
+        Span::styled(" • Flatpak/Native Apps:  ", Style::default().fg(C_MUTED)),
         Span::styled(format!("{selected_apps_count} Apps für Auto-Install vorgemerkt"), Style::default().fg(C_TEXT_BRIGHT)),
     ]));
     lines.push(Line::from(vec![

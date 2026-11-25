@@ -111,6 +111,15 @@ where
             "home/.var/app".to_string()
         } else if candidate.id == "nm_wifi" {
             "etc/NetworkManager/system-connections".to_string()
+        } else if candidate.id == "gh_cli" {
+            "home/.config/gh".to_string()
+        } else if candidate.id == "gitconfig" {
+            "home/.gitconfig".to_string()
+        } else if candidate.id == "git_credentials" {
+            "home/.git-credentials".to_string()
+        } else if candidate.id == "vscode" {
+            // Pre-Mapping von Windows %APPDATA%\Code\User nach ~/.config/Code/User!
+            "home/.config/Code/User".to_string()
         } else {
             match candidate.category {
                 CandidateCategory::Credentials => {
@@ -118,8 +127,8 @@ where
                     format!("home/{folder}")
                 }
                 CandidateCategory::ApplicationConfig => {
-                    // Pre-Mapping von Windows %APPDATA%\Code\User nach ~/.config/Code/User!
-                    "home/.config/Code/User".to_string()
+                    let folder = candidate.path.file_name().unwrap_or_default().to_string_lossy();
+                    format!("home/.config/{folder}")
                 }
                 CandidateCategory::Documents => "home/Documents".to_string(),
                 _ => {
@@ -264,7 +273,11 @@ where
         let path = entry.path();
         if path.is_file() {
             if let Ok(rel) = path.strip_prefix(src_dir) {
-                let archive_path = format!("{}/{}", archive_prefix, rel.to_string_lossy().replace('\\', "/"));
+                let archive_path = if rel.as_os_str().is_empty() {
+                    archive_prefix.to_string()
+                } else {
+                    format!("{}/{}", archive_prefix, rel.to_string_lossy().replace('\\', "/"))
+                };
 
                 if let Ok(mut f) = File::open(path) {
                     let size = f.metadata()?.len();

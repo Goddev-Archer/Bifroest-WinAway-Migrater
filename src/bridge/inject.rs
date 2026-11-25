@@ -41,6 +41,8 @@ pub fn determine_posix_mode(rel_path_in_home: &str, is_dir: bool) -> u32 {
             || norm.starts_with(".ssh/")
             || norm == ".gnupg"
             || norm.starts_with(".gnupg/")
+            || norm == ".config/gh"
+            || norm.starts_with(".config/gh/")
         {
             return 0o700;
         }
@@ -56,6 +58,8 @@ pub fn determine_posix_mode(rel_path_in_home: &str, is_dir: bool) -> u32 {
     }
 
     if norm.starts_with(".gnupg/")
+        || norm.starts_with(".config/gh/")
+        || norm == ".git-credentials"
         || norm.ends_with(".nmconnection")
         || norm.contains("NetworkManager/system-connections/")
     {

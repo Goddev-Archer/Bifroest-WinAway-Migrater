@@ -217,6 +217,65 @@ fn scan_filesystem_candidates(user_profile: &Path) -> Vec<CandidateItem> {
         });
     }
 
+    // Git globale Konfiguration (~/.gitconfig & ~/.git-credentials)
+    let gitconfig = user_profile.join(".gitconfig");
+    if gitconfig.is_file() {
+        let bytes = fs::metadata(&gitconfig).map(|m| m.len()).unwrap_or(0);
+        list.push(CandidateItem {
+            id: "gitconfig".to_string(),
+            path: gitconfig,
+            display_name: "~/.gitconfig".to_string(),
+            description: "Git Benutzername, E-Mail, Aliases & Einstellungen".to_string(),
+            total_bytes: bytes,
+            size_human: format_bytes(bytes),
+            category: CandidateCategory::ApplicationConfig,
+            selected: true,
+            item_count: 1,
+        });
+    }
+
+    let git_credentials = user_profile.join(".git-credentials");
+    if git_credentials.is_file() {
+        let bytes = fs::metadata(&git_credentials).map(|m| m.len()).unwrap_or(0);
+        list.push(CandidateItem {
+            id: "git_credentials".to_string(),
+            path: git_credentials,
+            display_name: "~/.git-credentials".to_string(),
+            description: "Gespeicherte Git HTTPS Zugangsdaten (0600)".to_string(),
+            total_bytes: bytes,
+            size_human: format_bytes(bytes),
+            category: CandidateCategory::Credentials,
+            selected: true,
+            item_count: 1,
+        });
+    }
+
+    // GitHub CLI Konfiguration (%APPDATA%\GitHub CLI -> ~/.config/gh)
+    let gh_win = user_profile.join("AppData").join("Roaming").join("GitHub CLI");
+    let gh_linux = user_profile.join(".config").join("gh");
+    let gh_target = if gh_win.exists() {
+        Some((gh_win, "%APPDATA%\\GitHub CLI"))
+    } else if !has_xdg_config && gh_linux.exists() {
+        Some((gh_linux, "~/.config/gh"))
+    } else {
+        None
+    };
+
+    if let Some((gh_dir, display)) = gh_target {
+        let (bytes, count) = calculate_dir_size(&gh_dir, 3);
+        list.push(CandidateItem {
+            id: "gh_cli".to_string(),
+            path: gh_dir,
+            display_name: display.to_string(),
+            description: "GitHub CLI (gh) Hosts, Auth-Config & Aliases".to_string(),
+            total_bytes: bytes,
+            size_human: format_bytes(bytes),
+            category: CandidateCategory::Credentials,
+            selected: true,
+            item_count: count,
+        });
+    }
+
     // Downloads (Standardmäßig abgewählt)
     let downloads = user_profile.join("Downloads");
     if downloads.exists() {

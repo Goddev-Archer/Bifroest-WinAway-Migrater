@@ -47,6 +47,23 @@ options root=UUID={root_uuid}{subvol_opt} rw quiet
     (loader_conf, entry_conf)
 }
 
+fn resolve_native_pkg_for_distro<'a>(pkg: &'a str, distro_lc: &str) -> &'a str {
+    match pkg {
+        "gh" => {
+            if distro_lc.contains("debian")
+                || distro_lc.contains("ubuntu")
+                || distro_lc.contains("fedora")
+            {
+                "gh"
+            } else {
+                // Arch-based & Alpine package name for GitHub CLI
+                "github-cli"
+            }
+        }
+        _ => pkg,
+    }
+}
+
 /// Generates the systemd one-shot unit and shell script for first-boot Flatpak and native app installation.
 pub fn generate_postinstall_service(manifest: &MigrationManifest) -> (String, String) {
     let service_unit = "\
@@ -67,11 +84,20 @@ WantedBy=multi-user.target
     .to_string();
 
     let distro_lc = manifest.target_distro.to_lowercase();
+    let is_debian_family = distro_lc.contains("debian") || distro_lc.contains("ubuntu");
     let mut script = String::from("#!/bin/sh\nset -e\n\n");
     script.push_str("echo \"[Bifrost] Starte First-Boot Software-Provisioning...\"\n");
     script.push_str(
         "flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo || true\n\n",
     );
+
+    let has_native_pkgs = manifest
+        .selected_software
+        .iter()
+        .any(|s| s.will_reinstall && s.flatpak_id.is_none() && s.native_pkg.is_some());
+    if is_debian_family && has_native_pkgs {
+        script.push_str("DEBIAN_FRONTEND=noninteractive apt-get update || true\n");
+    }
 
     for sw in manifest.selected_software.iter().filter(|s| s.will_reinstall) {
         if let Some(fp_id) = &sw.flatpak_id {
@@ -79,12 +105,15 @@ WantedBy=multi-user.target
                 "flatpak install -y --noninteractive flathub {fp_id} || true\n"
             ));
         } else if let Some(pkg) = &sw.native_pkg {
-            let native_cmd = if distro_lc.contains("debian") || distro_lc.contains("ubuntu") {
-                format!("apt-get install -y {pkg}")
+            let resolved_pkg = resolve_native_pkg_for_distro(pkg, &distro_lc);
+            let native_cmd = if is_debian_family {
+                format!("DEBIAN_FRONTEND=noninteractive apt-get install -y {resolved_pkg}")
             } else if distro_lc.contains("fedora") {
-                format!("dnf install -y {pkg}")
+                format!("dnf install -y {resolved_pkg}")
+            } else if distro_lc.contains("alpine") {
+                format!("apk add --no-cache {resolved_pkg}")
             } else {
-                format!("pacman -S --noconfirm {pkg}")
+                format!("pacman -S --noconfirm {resolved_pkg}")
             };
             script.push_str(&format!("{native_cmd} || true\n"));
         }
@@ -913,5 +942,60 @@ mod tests {
         assert!(osr.contains("ID=fedora"));
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_generate_postinstall_service_ubuntu_and_arch_git_gh() {
+        use crate::model::DiscoveredSoftware;
+
+        let make_manifest = |distro: &str| MigrationManifest {
+            schema_version: "1.0.0".to_string(),
+            created_at_utc: 0,
+            source_os: "Windows 11".to_string(),
+            target_distro: distro.to_string(),
+            target_filesystem: "Ext4".to_string(),
+            clean_install: true,
+            user_profile: PathBuf::from("C:\\Users\\tester"),
+            target_username: "tester".to_string(),
+            selected_software: vec![
+                DiscoveredSoftware {
+                    name: "Git".to_string(),
+                    id: "Git.Git".to_string(),
+                    source: "Windows PATH".to_string(),
+                    flatpak_id: None,
+                    native_pkg: Some("git".to_string()),
+                    will_reinstall: true,
+                },
+                DiscoveredSoftware {
+                    name: "GitHub CLI".to_string(),
+                    id: "GitHub.cli".to_string(),
+                    source: "Windows PATH".to_string(),
+                    flatpak_id: None,
+                    native_pkg: Some("gh".to_string()),
+                    will_reinstall: true,
+                },
+            ],
+            git_repositories: vec![],
+            archived_categories: vec![],
+            total_uncompressed_bytes: 0,
+            total_files: 0,
+            archive_sha256: None,
+            desktop_env: None,
+            linux_migration_mode: None,
+            rollback_policy: None,
+            source_uid: None,
+            source_gid: None,
+            luks_uuid: None,
+        };
+
+        let (_, ubuntu_sh) = generate_postinstall_service(&make_manifest("Ubuntu 26.04 LTS"));
+        assert_eq!(ubuntu_sh.matches("apt-get update").count(), 1);
+        assert!(ubuntu_sh.contains("apt-get install -y git"));
+        assert!(ubuntu_sh.contains("apt-get install -y gh"));
+
+        let (_, arch_sh) = generate_postinstall_service(&make_manifest("Arch Linux"));
+        assert!(!arch_sh.contains("apt-get update"));
+        assert!(arch_sh.contains("pacman -S --noconfirm git"));
+        assert!(arch_sh.contains("pacman -S --noconfirm github-cli"));
     }
 }
