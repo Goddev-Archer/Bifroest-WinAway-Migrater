@@ -55,6 +55,8 @@ pub struct HandoffResult {
     pub bcd_guid: Option<String>,
     pub bcd_armed: bool,
     pub secure_boot_enabled: bool,
+    #[serde(default)]
+    pub secure_boot_override: bool,
     pub status_log: Vec<String>,
 }
 
@@ -688,6 +690,19 @@ pub fn stage_vm_handoff(
 pub fn stage_vm_handoff_with_progress<F>(
     user_profile: &Path,
     pack_result: &PackResult,
+    status_cb: F,
+) -> io::Result<HandoffResult>
+where
+    F: FnMut(&str),
+{
+    stage_vm_handoff_with_options(user_profile, pack_result, false, status_cb)
+}
+
+/// Same as `stage_vm_handoff_with_progress`, with an explicit opt-in flag to override the Secure Boot guard.
+pub fn stage_vm_handoff_with_options<F>(
+    user_profile: &Path,
+    pack_result: &PackResult,
+    force_secure_boot_override: bool,
     mut status_cb: F,
 ) -> io::Result<HandoffResult>
 where
@@ -779,9 +794,14 @@ exec /bin/bifroest --ramfs --archive \"$ARCHIVE_RAM\" --target-root /mnt/target_
 
     let secure_boot_enabled = detect_secure_boot();
     let mut status_log = Vec::new();
-    if secure_boot_enabled {
+    if secure_boot_enabled && !force_secure_boot_override {
         status_log.push(
             "[BLOCKED] UEFI Secure Boot ist AKTIV — ESP/bootmgfw.efi wird NICHT überschrieben, um Windows zu schützen."
+                .to_string(),
+        );
+    } else if secure_boot_enabled && force_secure_boot_override {
+        status_log.push(
+            "[WARN] UEFI Secure Boot ist AKTIV — Schutz per manuellem Override (force-secureboot) bewusst übergangen!"
                 .to_string(),
         );
     }
@@ -801,7 +821,7 @@ exec /bin/bifroest --ramfs --archive \"$ARCHIVE_RAM\" --target-root /mnt/target_
     let (uki_staged_path, bcd_guid, bcd_armed) = if is_sandbox_profile(user_profile) {
         status_log.push("Sandbox-Lauf erkannt: Live BCD/ESP Mutation übersprungen.".to_string());
         (None, None, false)
-    } else if secure_boot_enabled {
+    } else if secure_boot_enabled && !force_secure_boot_override {
         status_log.push(
             "Bitte deaktiviere UEFI Secure Boot (Hyper-V: Set-VMFirmware -VMName <VM> -EnableSecureBoot Off) und starte Bifröst erneut."
                 .to_string(),
@@ -831,6 +851,7 @@ exec /bin/bifroest --ramfs --archive \"$ARCHIVE_RAM\" --target-root /mnt/target_
         bcd_guid,
         bcd_armed,
         secure_boot_enabled,
+        secure_boot_override: force_secure_boot_override,
         status_log,
     })
 }

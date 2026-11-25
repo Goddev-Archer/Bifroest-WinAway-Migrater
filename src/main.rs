@@ -12,7 +12,7 @@ use std::{
 };
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -111,6 +111,12 @@ pub struct App {
     // Gescannte Live-Daten (werden erst nach dem Gate befüllt!)
     pub user_profile: PathBuf,
     pub secure_boot_enabled: bool,
+    pub secure_boot_override: bool,
+    pub show_command_bar: bool,
+    pub command_input: String,
+    pub command_feedback: Option<String>,
+    pub show_secure_boot_override_modal: bool,
+    pub override_modal_button_idx: usize,
     pub disk_info: Option<DiskScanInfo>,
     pub candidates: Vec<CandidateItem>,
     pub git_repos: Vec<GitRepoInfo>,
@@ -177,6 +183,12 @@ impl App {
 
             user_profile,
             secure_boot_enabled,
+            secure_boot_override: false,
+            show_command_bar: false,
+            command_input: String::new(),
+            command_feedback: None,
+            show_secure_boot_override_modal: false,
+            override_modal_button_idx: 0,
             disk_info: None,
             candidates: Vec::new(),
             git_repos: Vec::new(),
@@ -191,6 +203,10 @@ impl App {
             is_bridging: Arc::new(AtomicBool::new(false)),
             bridge_status_msg: Arc::new(Mutex::new("Bereit für VM-Bridge Test.".to_string())),
         }
+    }
+
+    pub fn is_secure_boot_blocked(&self) -> bool {
+        self.secure_boot_enabled && !self.secure_boot_override
     }
 
     // Startet den Scan ERST nach der Bestätigung des Gates!
@@ -271,6 +287,7 @@ impl App {
         let distro = self.distros[self.selected_distro].to_string();
         let fs = self.filesystems[self.selected_fs].to_string();
         let clean_install = self.clean_install;
+        let force_secure_boot_override = self.secure_boot_override;
 
         thread::spawn(move || {
             let res = create_blackbox_archive_with_mode(
@@ -291,9 +308,10 @@ impl App {
 
             if let Ok(pack_res) = res {
                 let progress_for_handoff = Arc::clone(&progress_arc);
-                if let Ok(handoff) = bridge::handoff::stage_vm_handoff_with_progress(
+                if let Ok(handoff) = bridge::handoff::stage_vm_handoff_with_options(
                     &user_prof,
                     &pack_res,
+                    force_secure_boot_override,
                     |stage_msg| {
                         if let Ok(mut lock) = progress_for_handoff.lock() {
                             if let Some(p) = lock.as_mut() {
@@ -687,7 +705,7 @@ fn run_app(
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    handle_key(app, key.code);
+                    handle_key(app, key.code, key.modifiers);
                 }
             }
         }
@@ -699,10 +717,85 @@ fn run_app(
     Ok(())
 }
 
+fn execute_app_command(app: &mut App) {
+    let raw = app.command_input.trim().to_ascii_lowercase();
+    let normalized = raw.trim_start_matches("--");
+
+    match normalized {
+        "" => {
+            app.show_command_bar = false;
+            app.command_feedback = None;
+        }
+        "force-secureboot" | "override-secureboot" | "unsafe-secureboot" | "bypass-secureboot" => {
+            app.show_command_bar = false;
+            app.command_input.clear();
+            app.command_feedback = None;
+            app.override_modal_button_idx = 0; // Standard: Abbrechen (Empfohlen)
+            app.show_secure_boot_override_modal = true;
+        }
+        "lock-secureboot" | "reset-secureboot" => {
+            app.secure_boot_override = false;
+            app.show_command_bar = false;
+            app.command_input.clear();
+            app.command_feedback = None;
+        }
+        "help" | "?" => {
+            app.command_feedback = Some("Befehle: force-secureboot | lock-secureboot | help".to_string());
+        }
+        _ => {
+            app.command_feedback = Some(format!("Unbekannter Befehl '{raw}' (tippe 'help')"));
+        }
+    }
+}
+
 // ============================================================================
 // GEFÜHRTE NAVIGATION & EVENT ROUTING
 // ============================================================================
-fn handle_key(app: &mut App, code: KeyCode) {
+fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    if app.show_secure_boot_override_modal {
+        match code {
+            KeyCode::Esc => {
+                app.show_secure_boot_override_modal = false;
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                app.override_modal_button_idx = 1 - app.override_modal_button_idx;
+            }
+            KeyCode::Enter => {
+                if app.override_modal_button_idx == 1 {
+                    app.secure_boot_override = true;
+                }
+                app.show_secure_boot_override_modal = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    if app.show_command_bar {
+        match code {
+            KeyCode::Esc => {
+                app.show_command_bar = false;
+                app.command_input.clear();
+                app.command_feedback = None;
+            }
+            KeyCode::Enter => {
+                execute_app_command(app);
+            }
+            KeyCode::Backspace => {
+                app.command_input.pop();
+                app.command_feedback = None;
+            }
+            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                if app.command_input.len() < 64 {
+                    app.command_input.push(c);
+                    app.command_feedback = None;
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     if app.show_last_warning_modal {
         match code {
             KeyCode::Esc => {
@@ -722,6 +815,16 @@ fn handle_key(app: &mut App, code: KeyCode) {
             }
             _ => {}
         }
+        return;
+    }
+
+    // Globaler Shortcut für das klitzekleine In-App-Befehlsfenster: Ctrl+K oder F12
+    if (modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('k') | KeyCode::Char('K')))
+        || code == KeyCode::F(12)
+    {
+        app.show_command_bar = true;
+        app.command_input.clear();
+        app.command_feedback = None;
         return;
     }
 
@@ -915,7 +1018,7 @@ fn handle_key(app: &mut App, code: KeyCode) {
                 app.clean_install = !app.clean_install;
             }
             KeyCode::Enter => {
-                if !app.secure_boot_enabled {
+                if !app.is_secure_boot_blocked() {
                     app.show_last_warning_modal = true;
                     app.final_button_idx = 0;
                 }
@@ -932,7 +1035,10 @@ fn handle_key(app: &mut App, code: KeyCode) {
                     .handoff_result
                     .lock()
                     .ok()
-                    .and_then(|l| l.as_ref().map(|h| h.bcd_armed && !h.secure_boot_enabled))
+                    .and_then(|l| {
+                        l.as_ref()
+                            .map(|h| h.bcd_armed && (!h.secure_boot_enabled || h.secure_boot_override))
+                    })
                     .unwrap_or(false);
                 if handoff_armed
                     && !app.is_packing.load(Ordering::SeqCst)
@@ -966,34 +1072,38 @@ fn ui(f: &mut Frame, app: &App) {
 
     if app.phase == Phase::Gate {
         render_gate_screen(f, size, app);
-        return;
-    }
-
-    if app.phase == Phase::Scanning {
+    } else if app.phase == Phase::Scanning {
         render_scanning_loading_screen(f, size, app);
-        return;
+    } else {
+        let padding = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(16),
+                Constraint::Length(1),
+            ])
+            .split(size);
+
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
+            .split(padding[1]);
+
+        render_guided_left_pane(f, cols[0], app);
+        render_guided_right_stepper(f, cols[1], app);
+        render_guided_footer(f, padding[2], app);
+
+        if app.show_last_warning_modal {
+            render_last_warning_modal(f, size, app);
+        }
     }
 
-    let padding = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(16),
-            Constraint::Length(1),
-        ])
-        .split(size);
+    if app.show_command_bar {
+        render_command_bar(f, size, app);
+    }
 
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
-        .split(padding[1]);
-
-    render_guided_left_pane(f, cols[0], app);
-    render_guided_right_stepper(f, cols[1], app);
-    render_guided_footer(f, padding[2], app);
-
-    if app.show_last_warning_modal {
-        render_last_warning_modal(f, size, app);
+    if app.show_secure_boot_override_modal {
+        render_secure_boot_override_modal(f, size, app);
     }
 }
 
@@ -1252,7 +1362,12 @@ fn render_phase_diagnostics(f: &mut Frame, area: Rect, block: Block, app: &App) 
         Span::styled(format!("{} Programme für Reinstallation identifiziert", app.software.len()), Style::default().fg(C_TEXT_BRIGHT)),
     ]));
 
-    if app.secure_boot_enabled {
+    if app.secure_boot_enabled && app.secure_boot_override {
+        lines.push(Line::from(vec![
+            Span::styled(" [!] UEFI Secure Boot:         ", Style::default().fg(C_WARN_TITLE).add_modifier(Modifier::BOLD)),
+            Span::styled("AKTIV — SCHUTZ MANUELL ÜBERSCHRIEBEN (FORCE-OVERRIDE!)", Style::default().fg(C_WARN_BORDER).add_modifier(Modifier::BOLD)),
+        ]));
+    } else if app.secure_boot_enabled {
         lines.push(Line::from(vec![
             Span::styled(" [!] UEFI Secure Boot:         ", Style::default().fg(C_WARN_TITLE).add_modifier(Modifier::BOLD)),
             Span::styled("AKTIV! (Unsigniertes bifrost-boot.efi wird blockiert -> vorher deaktivieren)", Style::default().fg(C_WARN_BORDER).add_modifier(Modifier::BOLD)),
@@ -1510,7 +1625,7 @@ fn render_phase_flightplan(f: &mut Frame, area: Rect, block: Block, app: &App) {
     ]));
 
     lines.push(Line::from(""));
-    if app.secure_boot_enabled {
+    if app.is_secure_boot_blocked() {
         lines.push(Line::from(Span::styled(
             "BLOCKIERT: UEFI Secure Boot ist AKTIV! Zündung gesperrt, damit Windows nicht ausgesperrt wird.",
             Style::default().fg(C_WARN_BORDER).add_modifier(Modifier::BOLD),
@@ -1519,13 +1634,22 @@ fn render_phase_flightplan(f: &mut Frame, area: Rect, block: Block, app: &App) {
             "Deaktiviere Secure Boot (Hyper-V: Set-VMFirmware -VMName <VM> -EnableSecureBoot Off) & starte neu.",
             Style::default().fg(C_WARN_TITLE),
         )));
+    } else if app.secure_boot_enabled && app.secure_boot_override {
+        lines.push(Line::from(Span::styled(
+            "WARNUNG: Secure-Boot-Schutz wurde per Override (force-secureboot) manuell deaktiviert!",
+            Style::default().fg(C_WARN_BORDER).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "ACHTUNG: Fortfahren erfolgt auf eigene Gefahr (unsigniertes UKI wird bei aktivem SB blockiert).",
+            Style::default().fg(C_WARN_TITLE),
+        )));
     } else {
         lines.push(Line::from(Span::styled("ACHTUNG: Nach der Bestätigung wird das Blackbox-Archiv erzeugt.", Style::default().fg(C_WARN_TITLE))));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("───────────────────────────────────────────────────────────────────", Style::default().fg(C_BORDER))));
-    if app.secure_boot_enabled {
+    if app.is_secure_boot_blocked() {
         lines.push(Line::from(vec![
             Span::styled("[Esc: Zurück]  ", Style::default().fg(C_MUTED)),
             Span::styled(" [ ZÜNDUNG GESPERRT: SECURE BOOT AKTIV ] ", Style::default().bg(C_MUTED).fg(Color::Black).add_modifier(Modifier::BOLD)),
@@ -1818,7 +1942,9 @@ fn render_guided_footer(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("[Enter] ", Style::default().fg(C_WARN_TITLE).add_modifier(Modifier::BOLD)),
             Span::styled("ZÜNDUNG / PACKEN  ", Style::default().fg(C_TEXT_BRIGHT)),
             Span::styled("[Esc] ", Style::default().fg(C_TEXT_BRIGHT).add_modifier(Modifier::BOLD)),
-            Span::styled("Zurück zum Blueprint", Style::default().fg(C_MUTED)),
+            Span::styled("Zurück zum Blueprint  ", Style::default().fg(C_MUTED)),
+            Span::styled("[Ctrl+K / F12] ", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled("Befehlszeile", Style::default().fg(C_MUTED)),
         ]),
         Phase::Executing => Line::from(vec![
             Span::styled("[B] ", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
@@ -1887,6 +2013,123 @@ fn render_last_warning_modal(f: &mut Frame, area: Rect, app: &App) {
 }
 
 // ============================================================================
+// OVERLAY: MINI-BEFEHLSZEILENFENSTER (Ctrl+K / F12)
+// ============================================================================
+fn render_command_bar(f: &mut Frame, area: Rect, app: &App) {
+    let width = 58.min(area.width.saturating_sub(4));
+    let height = 5.min(area.height.saturating_sub(2));
+
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = area.height.saturating_sub(height + 3).max(1);
+    let bar_rect = Rect::new(x, y, width, height);
+
+    render_drop_shadow(f, bar_rect);
+    f.render_widget(Clear, bar_rect);
+
+    let block = Block::default()
+        .title(" Bifrost Command Bar (Enter: Run | Esc: Close) ")
+        .title_style(Style::default().fg(C_ACCENT).bg(C_SURFACE).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(C_BORDER_FOCUS))
+        .style(Style::default().bg(C_SURFACE));
+
+    let hint_line = if let Some(msg) = &app.command_feedback {
+        Line::from(Span::styled(msg.as_str(), Style::default().fg(C_WARN_TITLE)))
+    } else {
+        Line::from(Span::styled(
+            "Befehle: force-secureboot | lock-secureboot | help",
+            Style::default().fg(C_MUTED),
+        ))
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(" > ", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(app.command_input.as_str(), Style::default().fg(C_TEXT_BRIGHT)),
+            Span::styled("█", Style::default().fg(C_ACCENT)),
+        ]),
+        hint_line,
+    ];
+
+    f.render_widget(Paragraph::new(lines).block(block), bar_rect);
+}
+
+// ============================================================================
+// MODAL: EXPLIZITE WARNUNG BEIM SECURE-BOOT-OVERRIDE
+// ============================================================================
+fn render_secure_boot_override_modal(f: &mut Frame, area: Rect, app: &App) {
+    let width = 68.min(area.width.saturating_sub(4));
+    let height = 16.min(area.height.saturating_sub(2));
+
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_rect = Rect::new(x, y, width, height);
+
+    render_drop_shadow(f, modal_rect);
+    f.render_widget(Clear, modal_rect);
+
+    let block = Block::default()
+        .title(" ! WARNUNG: SECURE-BOOT-SCHUTZ UMGEHEN ! ")
+        .title_style(Style::default().fg(C_WARN_TITLE).bg(C_SURFACE).add_modifier(Modifier::BOLD))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(C_WARN_BORDER))
+        .style(Style::default().bg(C_SURFACE));
+
+    let cancel_style = if app.override_modal_button_idx == 0 {
+        Style::default().bg(Color::White).fg(Color::Black).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(C_MUTED)
+    };
+
+    let proceed_style = if app.override_modal_button_idx == 1 {
+        Style::default().bg(Color::LightRed).fg(Color::Black).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(C_WARN_BORDER)
+    };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "WIR RATEN EXPLIZIT DAVON AB!",
+            Style::default().fg(C_WARN_BORDER).add_modifier(Modifier::BOLD),
+        )),
+        Line::from("Du bist dabei, den internen Secure-Boot-Schutz zu deaktivieren."),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Bei aktivem UEFI Secure Boot blockiert die Firmware das unsignierte",
+            Style::default().fg(C_WARN_TITLE),
+        )),
+        Line::from(Span::styled(
+            "bifrost-boot.efi ('hash is not allowed (DB)'). Da bootmgfw.efi ersetzt",
+            Style::default().fg(C_WARN_TITLE),
+        )),
+        Line::from(Span::styled(
+            "wird, startet danach weder Bifröst noch Windows ohne Eingriff!",
+            Style::default().fg(C_WARN_TITLE),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Fortfahren geschieht komplett auf eigene Verantwortung.",
+            Style::default().fg(C_TEXT_BRIGHT),
+        )),
+        Line::from(Span::styled(
+            "────────────────────────────────────────────────────────────────",
+            Style::default().fg(C_BORDER),
+        )),
+        Line::from(vec![
+            Span::styled(" [ Abbrechen (Empfohlen) ] ", cancel_style),
+            Span::raw("   "),
+            Span::styled(" [ Trotzdem fortfahren ] ", proceed_style),
+        ]),
+    ];
+
+    f.render_widget(Paragraph::new(lines).block(block).alignment(Alignment::Center), modal_rect);
+}
+
+// ============================================================================
 // HELPER: BIOS/MEMTEST86 DROP SHADOW
 // ============================================================================
 fn render_drop_shadow(f: &mut Frame, rect: Rect) {
@@ -1898,4 +2141,61 @@ fn render_drop_shadow(f: &mut Frame, rect: Rect) {
     };
     let shadow_block = Block::default().style(Style::default().bg(C_SHADOW));
     f.render_widget(shadow_block, shadow_rect);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_command_bar_and_secure_boot_override_flow() {
+        let mut app = App::new();
+        app.secure_boot_enabled = true;
+        app.phase = Phase::Flightplan;
+
+        // Blocked by default when Secure Boot is active
+        assert!(app.is_secure_boot_blocked());
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!app.show_last_warning_modal);
+
+        // Open mini command bar via Ctrl+K
+        handle_key(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert!(app.show_command_bar);
+
+        // Typing 'q' inside command bar must NOT quit the app
+        for ch in "force-secureboot".chars() {
+            handle_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        assert!(!app.should_quit);
+
+        // Execute command -> opens explicit warning popup (does not override yet!)
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!app.show_command_bar);
+        assert!(app.show_secure_boot_override_modal);
+        assert!(!app.secure_boot_override);
+        assert_eq!(app.override_modal_button_idx, 0); // Safe default: Cancel
+
+        // Switch to "Trotzdem fortfahren" and confirm
+        handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.override_modal_button_idx, 1);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!app.show_secure_boot_override_modal);
+        assert!(app.secure_boot_override);
+        assert!(!app.is_secure_boot_blocked());
+
+        // Now Enter in Flightplan opens the Last Warning modal
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.show_last_warning_modal);
+
+        // Re-lock via F12 -> lock-secureboot
+        app.show_last_warning_modal = false;
+        handle_key(&mut app, KeyCode::F(12), KeyModifiers::NONE);
+        assert!(app.show_command_bar);
+        for ch in "lock-secureboot".chars() {
+            handle_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!app.secure_boot_override);
+        assert!(app.is_secure_boot_blocked());
+    }
 }
