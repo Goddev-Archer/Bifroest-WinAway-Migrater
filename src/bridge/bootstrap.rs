@@ -403,14 +403,14 @@ pub fn ensure_os_release(etc_dir: &Path, target_distro: &str) -> io::Result<()> 
 }
 
 /// Generates `/usr/local/sbin/bifrost-init` (safe PID-1 respawn init for bootstrap rootfs images without systemd).
-fn generate_bifrost_init_script() -> String {
+pub fn generate_bifrost_init_script() -> String {
     "\
 #!/bin/sh
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin
 export TERM=linux
 
 mount -o remount,rw / 2>/dev/null || true
-mkdir -p /dev/pts /dev/shm /run /tmp
+mkdir -p /dev/pts /dev/shm /run /tmp /var/log
 chmod 1777 /tmp 2>/dev/null || true
 mount -t devpts devpts /dev/pts 2>/dev/null || true
 mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
@@ -427,16 +427,47 @@ elif [ -x /bin/bash ]; then
   SHELL_BIN=\"/bin/bash\"
 fi
 
+# Run first-boot software provisioning in background on non-systemd rootfs images
+if [ -x /usr/local/bin/bifrost-postinstall.sh ] && [ ! -f /var/lib/bifrost/.postinstall_done ]; then
+  (/usr/local/bin/bifrost-postinstall.sh >/var/log/bifrost-postinstall.log 2>&1 &)
+fi
+
+HAS_UTIL_SETSID_C=0
+if [ -x /usr/bin/setsid ] && /usr/bin/setsid --help 2>&1 | grep -q -- '-c'; then
+  HAS_UTIL_SETSID_C=1
+fi
+
+HAS_BB_SETSID=0
+HAS_BB_CTTYHACK=0
+if [ -x /usr/local/bin/busybox ]; then
+  BB_APPLETS=$(/usr/local/bin/busybox --list 2>/dev/null || true)
+  echo \"$BB_APPLETS\" | grep -qx 'setsid' && HAS_BB_SETSID=1
+  echo \"$BB_APPLETS\" | grep -qx 'cttyhack' && HAS_BB_CTTYHACK=1
+fi
+
 trap 'reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger' INT
 trap 'poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger' PWR TERM HUP
 
 while true; do
-  if [ -x /usr/local/bin/busybox ] && [ -c /dev/tty1 ]; then
-    /usr/local/bin/busybox setsid /usr/local/bin/busybox cttyhack \"$SHELL_BIN\" -l </dev/tty1 >/dev/tty1 2>&1
+  TTY_DEV=\"\"
+  if [ -c /dev/tty1 ]; then
+    TTY_DEV=\"/dev/tty1\"
   elif [ -c /dev/tty0 ]; then
-    \"$SHELL_BIN\" -l </dev/tty0 >/dev/tty0 2>&1
+    TTY_DEV=\"/dev/tty0\"
+  fi
+
+  if [ -n \"$TTY_DEV\" ]; then
+    if [ \"$HAS_UTIL_SETSID_C\" = \"1\" ]; then
+      /usr/bin/setsid -c \"$SHELL_BIN\" -l <\"$TTY_DEV\" >\"$TTY_DEV\" 2>&1
+    elif [ \"$HAS_BB_SETSID\" = \"1\" ] && [ \"$HAS_BB_CTTYHACK\" = \"1\" ]; then
+      /usr/local/bin/busybox setsid /usr/local/bin/busybox cttyhack \"$SHELL_BIN\" -l <\"$TTY_DEV\" >\"$TTY_DEV\" 2>&1
+    elif [ \"$HAS_BB_SETSID\" = \"1\" ]; then
+      /usr/local/bin/busybox setsid \"$SHELL_BIN\" -i -l <\"$TTY_DEV\" >\"$TTY_DEV\" 2>&1
+    else
+      \"$SHELL_BIN\" -i -l <\"$TTY_DEV\" >\"$TTY_DEV\" 2>&1
+    fi
   else
-    \"$SHELL_BIN\" -l
+    \"$SHELL_BIN\" -i -l
   fi
   sleep 1
 done
@@ -997,5 +1028,13 @@ mod tests {
         assert!(!arch_sh.contains("apt-get update"));
         assert!(arch_sh.contains("pacman -S --noconfirm git"));
         assert!(arch_sh.contains("pacman -S --noconfirm github-cli"));
+    }
+
+    #[test]
+    fn test_bifrost_init_guards_cttyhack_and_runs_postinstall() {
+        let init_sh = generate_bifrost_init_script();
+        assert!(init_sh.contains("HAS_BB_CTTYHACK"));
+        assert!(init_sh.contains("/usr/bin/setsid -c"));
+        assert!(init_sh.contains("/usr/local/bin/bifrost-postinstall.sh"));
     }
 }

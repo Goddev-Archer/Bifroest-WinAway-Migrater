@@ -203,7 +203,7 @@ else
 fi
 
 # Symlinks für BusyBox Applets (bestehende echte Binaries wie modprobe nicht überschreiben)
-for cmd in sh mount umount mdev insmod mkdir find head tail cp mv rm cat echo grep awk cut tr sleep clear poweroff reboot ls yes dd df du chmod chown chroot cttyhack setsid sync uname ip udhcpc ln; do
+for cmd in sh mount umount mdev insmod mkdir find head tail cp mv rm cat echo grep awk cut tr sleep clear poweroff reboot ls yes dd df du chmod chown chroot setsid sync uname ip udhcpc ln; do
   if [ ! -e "$WORK_DIR/bin/$cmd" ]; then
     ln -sf /bin/busybox "$WORK_DIR/bin/$cmd"
   fi
@@ -326,6 +326,12 @@ install_target_runtime_helpers() {
       ln -sf /usr/local/bin/busybox "$TGT/usr/local/sbin/$pcmd" 2>/dev/null || true
     fi
   done
+  # Self-heal legacy bifrost-init scripts that called busybox cttyhack when unavailable
+  if [ -f "$TGT/usr/local/sbin/bifrost-init" ] && grep -q "busybox cttyhack" "$TGT/usr/local/sbin/bifrost-init" 2>/dev/null; then
+    if ! /bin/busybox --list 2>/dev/null | grep -qx "cttyhack"; then
+      sed -i 's|/usr/local/bin/busybox setsid /usr/local/bin/busybox cttyhack "$SHELL_BIN" -l|/usr/local/bin/busybox setsid "$SHELL_BIN" -i -l|g' "$TGT/usr/local/sbin/bifrost-init" 2>/dev/null || true
+    fi
+  fi
 }
 
 if grep -q "bifrost_auto=1" /proc/cmdline; then

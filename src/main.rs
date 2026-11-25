@@ -110,6 +110,7 @@ pub struct App {
 
     // Gescannte Live-Daten (werden erst nach dem Gate befüllt!)
     pub user_profile: PathBuf,
+    pub secure_boot_enabled: bool,
     pub disk_info: Option<DiskScanInfo>,
     pub candidates: Vec<CandidateItem>,
     pub git_repos: Vec<GitRepoInfo>,
@@ -132,7 +133,8 @@ impl App {
         let user_profile = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("C:\\Users\\santa"));
+            .unwrap_or_else(|_| PathBuf::from("C:\\Users\\Default"));
+        let secure_boot_enabled = bridge::handoff::detect_secure_boot();
 
         Self {
             should_quit: false,
@@ -174,6 +176,7 @@ impl App {
             selected_sw_idx: 0,
 
             user_profile,
+            secure_boot_enabled,
             disk_info: None,
             candidates: Vec::new(),
             git_repos: Vec::new(),
@@ -912,8 +915,10 @@ fn handle_key(app: &mut App, code: KeyCode) {
                 app.clean_install = !app.clean_install;
             }
             KeyCode::Enter => {
-                app.show_last_warning_modal = true;
-                app.final_button_idx = 0;
+                if !app.secure_boot_enabled {
+                    app.show_last_warning_modal = true;
+                    app.final_button_idx = 0;
+                }
             }
             _ => {}
         },
@@ -923,7 +928,16 @@ fn handle_key(app: &mut App, code: KeyCode) {
                 app.start_vm_bridge_simulation();
             }
             KeyCode::Char('r') | KeyCode::Char('R') => {
-                if !app.is_packing.load(Ordering::SeqCst) && !app.is_bridging.load(Ordering::SeqCst) {
+                let handoff_armed = app
+                    .handoff_result
+                    .lock()
+                    .ok()
+                    .and_then(|l| l.as_ref().map(|h| h.bcd_armed && !h.secure_boot_enabled))
+                    .unwrap_or(false);
+                if handoff_armed
+                    && !app.is_packing.load(Ordering::SeqCst)
+                    && !app.is_bridging.load(Ordering::SeqCst)
+                {
                     #[cfg(target_os = "windows")]
                     {
                         let _ = std::process::Command::new("shutdown")
@@ -1238,6 +1252,18 @@ fn render_phase_diagnostics(f: &mut Frame, area: Rect, block: Block, app: &App) 
         Span::styled(format!("{} Programme für Reinstallation identifiziert", app.software.len()), Style::default().fg(C_TEXT_BRIGHT)),
     ]));
 
+    if app.secure_boot_enabled {
+        lines.push(Line::from(vec![
+            Span::styled(" [!] UEFI Secure Boot:         ", Style::default().fg(C_WARN_TITLE).add_modifier(Modifier::BOLD)),
+            Span::styled("AKTIV! (Unsigniertes bifrost-boot.efi wird blockiert -> vorher deaktivieren)", Style::default().fg(C_WARN_BORDER).add_modifier(Modifier::BOLD)),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(" [✓] UEFI Secure Boot:         ", Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD)),
+            Span::styled("Deaktiviert / Aus (Bereit für Zero-BIOS UKI Handoff)", Style::default().fg(C_TEXT_BRIGHT)),
+        ]));
+    }
+
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("───────────────────────────────────────────────────────────────────", Style::default().fg(C_BORDER))));
     lines.push(Line::from(vec![
@@ -1484,15 +1510,33 @@ fn render_phase_flightplan(f: &mut Frame, area: Rect, block: Block, app: &App) {
     ]));
 
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("ACHTUNG: Nach der Bestätigung wird das Blackbox-Archiv erzeugt.", Style::default().fg(C_WARN_TITLE))));
+    if app.secure_boot_enabled {
+        lines.push(Line::from(Span::styled(
+            "BLOCKIERT: UEFI Secure Boot ist AKTIV! Zündung gesperrt, damit Windows nicht ausgesperrt wird.",
+            Style::default().fg(C_WARN_BORDER).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "Deaktiviere Secure Boot (Hyper-V: Set-VMFirmware -VMName <VM> -EnableSecureBoot Off) & starte neu.",
+            Style::default().fg(C_WARN_TITLE),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled("ACHTUNG: Nach der Bestätigung wird das Blackbox-Archiv erzeugt.", Style::default().fg(C_WARN_TITLE))));
+    }
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("───────────────────────────────────────────────────────────────────", Style::default().fg(C_BORDER))));
-    lines.push(Line::from(vec![
-        Span::styled("[Esc: Zurück]  ", Style::default().fg(C_MUTED)),
-        Span::styled("[←/→ / M: Clean-Install/Dual-Boot]  ", Style::default().fg(C_ACCENT)),
-        Span::styled(" [ Enter: ZÜNDUNG / MIGRATION STARTEN ] ", Style::default().bg(C_WARN_BORDER).fg(Color::Black).add_modifier(Modifier::BOLD)),
-    ]));
+    if app.secure_boot_enabled {
+        lines.push(Line::from(vec![
+            Span::styled("[Esc: Zurück]  ", Style::default().fg(C_MUTED)),
+            Span::styled(" [ ZÜNDUNG GESPERRT: SECURE BOOT AKTIV ] ", Style::default().bg(C_MUTED).fg(Color::Black).add_modifier(Modifier::BOLD)),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("[Esc: Zurück]  ", Style::default().fg(C_MUTED)),
+            Span::styled("[←/→ / M: Clean-Install/Dual-Boot]  ", Style::default().fg(C_ACCENT)),
+            Span::styled(" [ Enter: ZÜNDUNG / MIGRATION STARTEN ] ", Style::default().bg(C_WARN_BORDER).fg(Color::Black).add_modifier(Modifier::BOLD)),
+        ]));
+    }
 
     f.render_widget(Paragraph::new(lines).block(block), area);
 }

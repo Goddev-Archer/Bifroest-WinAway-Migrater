@@ -780,7 +780,10 @@ exec /bin/bifroest --ramfs --archive \"$ARCHIVE_RAM\" --target-root /mnt/target_
     let secure_boot_enabled = detect_secure_boot();
     let mut status_log = Vec::new();
     if secure_boot_enabled {
-        status_log.push("[WARN] UEFI Secure Boot ist AKTIV (nicht signiertes UKI kann blockiert werden).".to_string());
+        status_log.push(
+            "[BLOCKED] UEFI Secure Boot ist AKTIV — ESP/bootmgfw.efi wird NICHT überschrieben, um Windows zu schützen."
+                .to_string(),
+        );
     }
 
     // Stage target distro rootfs (honoring user's choice & local custom rootfs)
@@ -797,6 +800,12 @@ exec /bin/bifroest --ramfs --archive \"$ARCHIVE_RAM\" --target-root /mnt/target_
     #[cfg(target_os = "windows")]
     let (uki_staged_path, bcd_guid, bcd_armed) = if is_sandbox_profile(user_profile) {
         status_log.push("Sandbox-Lauf erkannt: Live BCD/ESP Mutation übersprungen.".to_string());
+        (None, None, false)
+    } else if secure_boot_enabled {
+        status_log.push(
+            "Bitte deaktiviere UEFI Secure Boot (Hyper-V: Set-VMFirmware -VMName <VM> -EnableSecureBoot Off) und starte Bifröst erneut."
+                .to_string(),
+        );
         (None, None, false)
     } else {
         arm_windows_efi_handoff(&stage_dir, &esp_drive, &efi_batch_script, &mut status_log)
