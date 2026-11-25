@@ -104,3 +104,17 @@
 - [ ] Blackbox is 100% preserved in RAM during Clean Install and restored to `/home`.
 - [ ] A real base rootfs (Arch Linux) is extracted to `@root`, providing actual binaries (`/bin/sh`, `pacman`, `vmlinuz-linux`).
 - [ ] The VM reboots directly into a working Linux shell or desktop without falling back to UEFI setup.
+
+---
+
+## 5. `bifroest-linux` (Zero-BIOS Linux-to-Linux Migration Engine)
+
+Bifröst includes a dedicated static Linux binary (`bifroest-linux`, entry point `src/bin/bifroest_linux.rs`) sharing the `bifroest` core library (`src/lib.rs`) for direct Linux-to-Linux migrations:
+
+- **Mode A – Btrfs Subvolume-Hop (`src/bridge/linux_hop.rs`):**
+  - Reuses `@home` Zero-Copy without moving user files, installs the chosen distribution into `@root_<distro>`, preserves exact UID/GID/shadow credentials, LUKS2 `/etc/crypttab` + crypt hooks, and NetworkManager WiFi connections, and provisions kernel + chosen desktop (`CLI Only`, `XFCE4`, `KDE Plasma`, `GNOME`, `Hyprland`) in chroot (with host-kernel offline fallback).
+  - **Hybrid Rollback Policy:** Users freely choose between keeping `@root_old` + `bifroest-rollback.conf` (later removable with `bifroest-linux --cleanup`) or **Direct Purge** after bootloader verification.
+- **Mode B – RAMFS Full-Transit:**
+  - Stages Blackbox + target rootfs + `bifrost-boot.efi` for Ext4/XFS/wipe transitions.
+- **Zero-BIOS UEFI Handoff (`src/bridge/linux_efi.rs`):**
+  - Configures `systemd-boot` entries and arms UEFI `efibootmgr --bootnext` without requiring BIOS interaction.

@@ -1,7 +1,7 @@
 use flate2::read::GzDecoder;
 use std::{
     fs::{self, File},
-    io::{self, BufReader, Read},
+    io::{self, BufReader, Cursor, Read},
     path::{Component, Path, PathBuf},
 };
 use tar::Archive;
@@ -118,9 +118,9 @@ fn sanitize_rootfs_rel_path(raw: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-/// Unpacks a compressed `.tar.zst` or `.tar.gz` rootfs archive (detected via magic bytes) into `target_root`
-/// while preserving `/etc/fstab`.
-fn extract_rootfs_archive<F>(
+/// Unpacks a compressed `.tar.zst`, `.tar.gz`, or `.tar.xz` rootfs archive (detected via magic bytes)
+/// into `target_root` while preserving `/etc/fstab`.
+pub fn extract_rootfs_archive<F>(
     rootfs: &Path,
     target_root: &Path,
     total_steps: usize,
@@ -129,19 +129,24 @@ fn extract_rootfs_archive<F>(
 where
     F: FnMut(&str, usize, usize),
 {
-    let mut magic = [0u8; 2];
-    {
+    let mut magic = [0u8; 6];
+    let n_read = {
         let mut probe = File::open(rootfs)?;
-        let _ = probe.read(&mut magic)?;
-    }
+        probe.read(&mut magic)?
+    };
 
     let f = File::open(rootfs)?;
-    let reader: Box<dyn Read> = if magic == [0x1f, 0x8b] {
+    let mut reader: Box<dyn Read> = if n_read >= 2 && magic[0] == 0x1f && magic[1] == 0x8b {
         Box::new(GzDecoder::new(BufReader::new(f)))
+    } else if n_read >= 6 && magic == [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00] {
+        let mut xz_out = Vec::new();
+        lzma_rs::xz_decompress(&mut BufReader::new(f), &mut xz_out)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("XZ Dekomprimierung fehlgeschlagen: {e}")))?;
+        Box::new(Cursor::new(xz_out))
     } else {
         Box::new(Decoder::new(BufReader::new(f))?)
     };
-    let mut tar = Archive::new(reader);
+    let mut tar = Archive::new(&mut reader);
     let mut files_count = 0usize;
 
     for entry_res in tar.entries()? {
@@ -238,7 +243,7 @@ where
 }
 
 /// Appends standard Linux device/system groups missing from `/etc/group` without touching existing entries.
-fn ensure_standard_groups(etc_dir: &Path) -> io::Result<()> {
+pub fn ensure_standard_groups(etc_dir: &Path) -> io::Result<()> {
     let group_path = etc_dir.join("group");
     let existing = fs::read_to_string(&group_path).unwrap_or_else(|_| "root:x:0:\n".to_string());
     let mut updated = existing.clone();
@@ -297,8 +302,43 @@ Server = http://geo.mirror.pkgbuild.com/$repo/os/$arch
     Ok(true)
 }
 
+/// Configures active Arch, Ubuntu 26.04, Debian, or Fedora package repositories inside `target_root`.
+pub fn ensure_distro_package_repos(target_root: &Path, target_distro: &str) -> io::Result<()> {
+    let _ = configure_arch_mirrors_if_present(target_root);
+    let lc = target_distro.to_lowercase();
+
+    if lc.contains("ubuntu") {
+        let sources_dir = target_root.join("etc/apt");
+        let sources_file = sources_dir.join("sources.list");
+        let existing = fs::read_to_string(&sources_file).unwrap_or_default();
+        if !existing.contains("archive.ubuntu.com") && !target_root.join("etc/apt/sources.list.d/ubuntu.sources").exists() {
+            fs::create_dir_all(&sources_dir)?;
+            fs::write(
+                &sources_file,
+                "deb http://archive.ubuntu.com/ubuntu resolute main restricted universe multiverse\n\
+                 deb http://archive.ubuntu.com/ubuntu resolute-updates main restricted universe multiverse\n\
+                 deb http://security.ubuntu.com/ubuntu resolute-security main restricted universe multiverse\n",
+            )?;
+        }
+    } else if lc.contains("debian") {
+        let sources_dir = target_root.join("etc/apt");
+        let sources_file = sources_dir.join("sources.list");
+        let existing = fs::read_to_string(&sources_file).unwrap_or_default();
+        if !existing.contains("deb.debian.org") {
+            fs::create_dir_all(&sources_dir)?;
+            fs::write(
+                &sources_file,
+                "deb http://deb.debian.org/debian bookworm main contrib non-free-firmware\n\
+                 deb http://security.debian.org/debian-security bookworm-security main contrib non-free-firmware\n\
+                 deb http://deb.debian.org/debian bookworm-updates main contrib non-free-firmware\n",
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Writes an accurate `/etc/os-release` ONLY if the extracted distro did not ship its own genuine identity.
-fn ensure_os_release(etc_dir: &Path, target_distro: &str) -> io::Result<()> {
+pub fn ensure_os_release(etc_dir: &Path, target_distro: &str) -> io::Result<()> {
     let os_release_path = etc_dir.join("os-release");
     if let Ok(existing) = fs::read_to_string(&os_release_path) {
         let trimmed = existing.trim();
@@ -393,11 +433,14 @@ if command -v pacman >/dev/null 2>&1; then
 elif command -v apt-get >/dev/null 2>&1; then
   PM=\"apt\"
   echo \"  Erkannter Paketmanager: apt (Ubuntu / Debian)\"
+elif command -v dnf >/dev/null 2>&1; then
+  PM=\"dnf\"
+  echo \"  Erkannter Paketmanager: dnf (Fedora)\"
 elif command -v apk >/dev/null 2>&1; then
   PM=\"apk\"
   echo \"  Erkannter Paketmanager: apk (Alpine / Asgard Minimal)\"
 else
-  echo \"  Kein unterstuetzter Paketmanager (pacman/apt/apk) gefunden.\"
+  echo \"  Kein unterstuetzter Paketmanager (pacman/apt/dnf/apk) gefunden.\"
   exit 1
 fi
 
@@ -470,6 +513,29 @@ elif [ \"$PM\" = \"apt\" ]; then
     4)
       apt-get install -y sway foot dbus-x11 fonts-dejavu
       echo \"[OK] Sway (Wayland Tiling) installiert!\"
+      ;;
+    *)
+      echo \"Ungueltige Auswahl.\"
+      exit 1
+      ;;
+  esac
+elif [ \"$PM\" = \"dnf\" ]; then
+  case \"$CHOICE\" in
+    1)
+      dnf install -y @xfce-desktop-environment lightdm dejavu-sans-fonts
+      echo \"[OK] XFCE4 installiert! Starten mit: startx /usr/bin/startxfce4\"
+      ;;
+    2)
+      dnf install -y @kde-desktop-environment sddm konsole
+      echo \"[OK] KDE Plasma installiert!\"
+      ;;
+    3)
+      dnf install -y @workstation-product-environment gdm
+      echo \"[OK] GNOME installiert!\"
+      ;;
+    4)
+      dnf install -y hyprland kitty waybar wofi dejavu-sans-fonts
+      echo \"[OK] Hyprland installiert! Starten mit: Hyprland\"
       ;;
     *)
       echo \"Ungueltige Auswahl.\"
@@ -616,7 +682,7 @@ where
     fs::write(etc_dir.join("hostname"), "asgard-linux\n")?;
     ensure_os_release(&etc_dir, &manifest.target_distro)?;
     ensure_standard_groups(&etc_dir)?;
-    let _ = configure_arch_mirrors_if_present(target_root);
+    let _ = ensure_distro_package_repos(target_root, &manifest.target_distro);
 
     // Only write BusyBox inittab when no systemd init is installed
     let has_systemd = target_root.join("usr/lib/systemd/systemd").exists()
@@ -676,6 +742,8 @@ where
            echo \"[Packages]   pacman bereit (Erststart: pacman-key --init && pacman-key --populate archlinux)\"\n\
          elif command -v apt-get >/dev/null 2>&1; then\n\
            echo \"[Packages]   apt bereit (z. B. apt update && apt install ...)\"\n\
+         elif command -v dnf >/dev/null 2>&1; then\n\
+           echo \"[Packages]   dnf bereit (z. B. dnf install ...)\"\n\
          elif command -v apk >/dev/null 2>&1; then\n\
            echo \"[Packages]   apk bereit (z. B. apk update && apk add ...)\"\n\
          fi\n\
@@ -805,6 +873,44 @@ mod tests {
 
         let helper = generate_desktop_helper_script();
         assert!(helper.contains("apt-get"));
+        assert!(helper.contains("dnf"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_extract_xz_rootfs_archive() {
+        let tmp = std::env::temp_dir().join("bifrost_bootstrap_test_fedora_xz");
+        let _ = fs::remove_dir_all(&tmp);
+        let target = tmp.join("target");
+        fs::create_dir_all(&target).unwrap();
+
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let data = b"NAME=\"Fedora Linux\"\nPRETTY_NAME=\"Fedora Linux 41\"\nID=fedora\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, "etc/os-release", &data[..]).unwrap();
+            builder.finish().unwrap();
+        }
+
+        let archive_path = tmp.join("bifrost_rootfs.tar.xz");
+        {
+            let mut xz_out = Vec::new();
+            lzma_rs::xz_compress(&mut io::Cursor::new(tar_bytes), &mut xz_out).unwrap();
+            fs::write(&archive_path, xz_out).unwrap();
+        }
+
+        let count = extract_rootfs_archive(&archive_path, &target, 4, &mut |_, _, _| {}).unwrap();
+        assert_eq!(count, 1);
+
+        ensure_os_release(&target.join("etc"), "Fedora 41").unwrap();
+        let osr = fs::read_to_string(target.join("etc/os-release")).unwrap();
+        assert!(osr.contains("Fedora Linux 41"));
+        assert!(osr.contains("ID=fedora"));
 
         let _ = fs::remove_dir_all(&tmp);
     }

@@ -55,7 +55,10 @@ pub fn determine_posix_mode(rel_path_in_home: &str, is_dir: bool) -> u32 {
         return 0o600;
     }
 
-    if norm.starts_with(".gnupg/") {
+    if norm.starts_with(".gnupg/")
+        || norm.ends_with(".nmconnection")
+        || norm.contains("NetworkManager/system-connections/")
+    {
         return 0o600;
     }
 
@@ -196,6 +199,24 @@ where
             }
 
             progress_cb(&format!("Restored: {rel_in_home}"), files_restored);
+        } else if let Some(rel_nm) = clean_str.strip_prefix("etc/NetworkManager/system-connections/") {
+            if rel_nm.is_empty() || !entry.header().entry_type().is_file() {
+                continue;
+            }
+            let nm_dir = target_root.join("etc/NetworkManager/system-connections");
+            fs::create_dir_all(&nm_dir)?;
+            apply_posix_mode(&nm_dir, 0o755)?;
+            let dest_nm = nm_dir.join(rel_nm);
+            if let Some(parent) = dest_nm.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut out = File::create(&dest_nm)?;
+            let copied = io::copy(&mut entry, &mut out)?;
+            files_restored += 1;
+            bytes_restored += copied;
+            apply_posix_mode(&dest_nm, 0o600)?;
+            permission_fixes.push((dest_nm, 0o600));
+            progress_cb(&format!("Restored WiFi: {rel_nm}"), files_restored);
         }
     }
 

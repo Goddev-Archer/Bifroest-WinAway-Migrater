@@ -1,7 +1,10 @@
 pub mod bootstrap;
+pub mod distro;
 pub mod fs;
 pub mod handoff;
 pub mod inject;
+pub mod linux_efi;
+pub mod linux_hop;
 pub mod partition;
 pub mod ramfs_cinema;
 
@@ -195,6 +198,7 @@ where
     let rootfs_opt = [
         Path::new("/tmp/bifrost_rootfs.tar.zst"),
         Path::new("/tmp/bifrost_rootfs.tar.gz"),
+        Path::new("/tmp/bifrost_rootfs.tar.xz"),
         Path::new("/usr/share/bifrost/base-rootfs.tar.zst"),
     ]
     .into_iter()

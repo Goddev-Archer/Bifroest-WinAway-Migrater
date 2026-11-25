@@ -104,20 +104,28 @@ where
             categories_packed.push(category_name);
         }
 
-        // Bestimme das relative Zielverzeichnis in der Blackbox (XDG konform!)
-        let archive_base_prefix = match candidate.category {
-            CandidateCategory::Credentials => {
-                let folder = candidate.path.file_name().unwrap_or_default().to_string_lossy();
-                format!("home/{folder}")
-            }
-            CandidateCategory::ApplicationConfig => {
-                // Pre-Mapping von Windows %APPDATA%\Code\User nach ~/.config/Code/User!
-                "home/.config/Code/User".to_string()
-            }
-            CandidateCategory::Documents => "home/Documents".to_string(),
-            _ => {
-                let folder = candidate.path.file_name().unwrap_or_default().to_string_lossy();
-                format!("home/{folder}")
+        // Bestimme das relative Zielverzeichnis in der Blackbox (XDG & Linux konform!)
+        let archive_base_prefix = if candidate.id == "xdg_config" {
+            "home/.config".to_string()
+        } else if candidate.id == "flatpak_data" {
+            "home/.var/app".to_string()
+        } else if candidate.id == "nm_wifi" {
+            "etc/NetworkManager/system-connections".to_string()
+        } else {
+            match candidate.category {
+                CandidateCategory::Credentials => {
+                    let folder = candidate.path.file_name().unwrap_or_default().to_string_lossy();
+                    format!("home/{folder}")
+                }
+                CandidateCategory::ApplicationConfig => {
+                    // Pre-Mapping von Windows %APPDATA%\Code\User nach ~/.config/Code/User!
+                    "home/.config/Code/User".to_string()
+                }
+                CandidateCategory::Documents => "home/Documents".to_string(),
+                _ => {
+                    let folder = candidate.path.file_name().unwrap_or_default().to_string_lossy();
+                    format!("home/{folder}")
+                }
             }
         };
 
@@ -161,10 +169,16 @@ where
         .cloned()
         .collect();
 
+    let source_os = if cfg!(target_os = "linux") {
+        "Linux".to_string()
+    } else {
+        "Windows 11".to_string()
+    };
+
     let manifest = MigrationManifest {
         schema_version: "1.0.0".to_string(),
         created_at_utc: now,
-        source_os: "Windows 11".to_string(),
+        source_os,
         target_distro: target_distro.to_string(),
         target_filesystem: target_filesystem.to_string(),
         clean_install,
@@ -176,6 +190,12 @@ where
         total_uncompressed_bytes: uncompressed_bytes,
         total_files,
         archive_sha256: None, // Wird nach dem Schließen berechnet
+        desktop_env: None,
+        linux_migration_mode: None,
+        rollback_policy: None,
+        source_uid: None,
+        source_gid: None,
+        luks_uuid: None,
     };
 
     let manifest_json = serde_json::to_vec_pretty(&manifest)
@@ -223,9 +243,17 @@ where
         .into_iter()
         .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
-            // Ignoriere typische Riesen-Cache-Ordner in Projekten
+            // Ignoriere typische Riesen-Cache-Ordner in Projekten & XDG Configs
             if entry.file_type().is_dir() {
-                if name == "node_modules" || name == "target" || name == ".cargo" || name == ".cache" {
+                if name == "node_modules"
+                    || name == "target"
+                    || name == ".cargo"
+                    || name == ".cache"
+                    || name == "Cache"
+                    || name == "CachedData"
+                    || name == "GPUCache"
+                    || name == "Code Cache"
+                {
                     return false;
                 }
             }

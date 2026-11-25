@@ -354,11 +354,12 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
         cp "$FOUND" "$ARCHIVE_RAM"
         WIN_PART="$part"
 
-        FOUND_ROOTFS=$(find /mnt/win_src -maxdepth 5 \( -iname "bifrost_rootfs.tar.zst" -o -iname "bifrost_rootfs.tar.gz" -o -iname "archlinux-bootstrap*.tar.zst" -o -iname "ubuntu-base*.tar.gz" \) 2>/dev/null | head -n 1 || true)
+        FOUND_ROOTFS=$(find /mnt/win_src -maxdepth 5 \( -iname "bifrost_rootfs.tar.zst" -o -iname "bifrost_rootfs.tar.gz" -o -iname "bifrost_rootfs.tar.xz" -o -iname "archlinux-bootstrap*.tar.zst" -o -iname "ubuntu-base*.tar.gz" \) 2>/dev/null | head -n 1 || true)
         if [ -n "$FOUND_ROOTFS" ]; then
           ROOTFS_DEST="$ROOTFS_RAM"
           case "$FOUND_ROOTFS" in
             *.tar.gz|*.tgz) ROOTFS_DEST="/tmp/bifrost_rootfs.tar.gz" ;;
+            *.tar.xz|*.txz) ROOTFS_DEST="/tmp/bifrost_rootfs.tar.xz" ;;
           esac
           ROOTFS_KB=$(du -k "$FOUND_ROOTFS" 2>/dev/null | awk '{print $1}')
           TMP_AVAIL_KB=$(df -k /tmp 2>/dev/null | tail -n 1 | awk '{print $4}')
@@ -376,6 +377,39 @@ if grep -q "bifrost_auto=1" /proc/cmdline; then
       umount /mnt/win_src || true
     fi
   done
+
+  # Fallback Mode B (Linux-to-Linux RAMFS Transit): Pruefe ext4/btrfs Transit-Quellen falls kein NTFS-Treffer vorlag
+  if [ -z "$WIN_PART" ]; then
+    for part in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* /dev/nvme[0-9]n[0-9]p[0-9]*; do
+      [ -b "$part" ] || continue
+      FSTYPE=$(blkid -s TYPE -o value "$part" 2>/dev/null || true)
+      if [ "$FSTYPE" != "ext4" ] && [ "$FSTYPE" != "btrfs" ]; then
+        continue
+      fi
+      if mount -t "$FSTYPE" -o ro "$part" /mnt/win_src 2>/dev/null; then
+        if [ ! -f /mnt/win_src/.bifrost_installed ]; then
+          FOUND=$(find /mnt/win_src -maxdepth 5 -path "*bifrost_linux_stage*" -iname "bifrost_blackbox.tar.zst" 2>/dev/null | head -n 1 || true)
+          if [ -n "$FOUND" ]; then
+            kmsg_log "Linux-Transit Blackbox gefunden auf $part: $FOUND"
+            cp "$FOUND" "$ARCHIVE_RAM"
+            WIN_PART="$part"
+            FOUND_ROOTFS=$(find /mnt/win_src -maxdepth 5 -path "*bifrost_linux_stage*" \( -iname "bifrost_rootfs.tar.zst" -o -iname "bifrost_rootfs.tar.gz" -o -iname "bifrost_rootfs.tar.xz" \) 2>/dev/null | head -n 1 || true)
+            if [ -n "$FOUND_ROOTFS" ]; then
+              ROOTFS_DEST="$ROOTFS_RAM"
+              case "$FOUND_ROOTFS" in
+                *.tar.gz|*.tgz) ROOTFS_DEST="/tmp/bifrost_rootfs.tar.gz" ;;
+                *.tar.xz|*.txz) ROOTFS_DEST="/tmp/bifrost_rootfs.tar.xz" ;;
+              esac
+              cp "$FOUND_ROOTFS" "$ROOTFS_DEST" 2>/dev/null || rm -f "$ROOTFS_DEST"
+            fi
+            umount /mnt/win_src || true
+            break
+          fi
+        fi
+        umount /mnt/win_src || true
+      fi
+    done
+  fi
 
   # Boot #2 Check: Wenn keine offene Blackbox-Migration ansteht, pruefe auf bereits installiertes Linux-System (Btrfs oder Ext4)!
   if [ -z "$WIN_PART" ]; then

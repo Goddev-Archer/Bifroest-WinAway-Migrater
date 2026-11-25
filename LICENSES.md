@@ -27,6 +27,7 @@ Bifröst packages a minimal, self-contained Unified Kernel Image (UKI, `bifrost-
 | **NTFS-3G** | [Tuxera / GitHub Community](https://github.com/tuxera/ntfs-3g) | **GPL-2.0-or-later** / **LGPL-2.0-or-later** | Safe NTFS mounting, cluster inspection (`ntfsresize`), and dirty-flag handling (`ntfsfix`). |
 | **btrfs-progs** | [Btrfs Project](https://btrfs.readthedocs.io) | **GPL-2.0-only** | Filesystem creation (`mkfs.btrfs`) and subvolume management (`@root`, `@home`, `@blackbox`). |
 | **apk-tools** | [Alpine Linux Project](https://alpinelinux.org) | **GPL-2.0-only** | Static package manager (`apk.static`) pre-bundled in the embedded Asgard Minimal fallback rootfs. |
+| **efibootmgr** | [RHBoot / efibootmgr](https://github.com/rhboot/efibootmgr) | **GPL-2.0-or-later** | Linux UEFI BootOrder & `--bootnext` Zero-BIOS handoff orchestration used by `bifroest-linux`. |
 | **systemd-boot** | [systemd Project](https://systemd.io) | **LGPL-2.1-or-later** | Minimal UEFI boot manager configuration deployed to the ESP. |
 
 > **Note on GPL System Call Exception:**  
@@ -44,6 +45,7 @@ The Bifröst Windows binary (`bifroest.exe`) and Linux RAMFS binary (`bifroest`)
 | **crossterm** | MIT | Cross-platform terminal control, alternate screen, and raw mode handling. |
 | **zstd** | MIT / BSD-3-Clause | High-speed, high-ratio compression for the migration Blackbox archive. |
 | **flate2** | MIT / Apache-2.0 | Pure-Rust Gzip decompression for `.tar.gz` distro rootfs images (e.g., Ubuntu 26.04 LTS Base). |
+| **lzma-rs** | MIT | Pure-Rust XZ/LZMA decompression for `.tar.xz` distro rootfs images (Fedora, Debian, Custom). |
 | **tar** | MIT / Apache-2.0 | POSIX archive packaging and streaming extraction. |
 | **serde** / **serde_json** | MIT / Apache-2.0 | Migration manifest serialization and software candidate cataloging. |
 | **walkdir** | Unlicense / MIT | Fast recursive filesystem traversal for Blackbox candidate discovery. |

@@ -58,10 +58,10 @@ jobs:
       - name: Run unit tests on Linux
         run: cargo test
 
-      - name: Build static Linux bifroest binary (musl)
+      - name: Build static Linux bifroest binaries (musl)
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
-        run: cargo build --release --target x86_64-unknown-linux-musl
+        run: cargo build --release --target x86_64-unknown-linux-musl --bins
 
       - name: Build Initramfs & extract Alpine Virt Kernel
         run: |
@@ -111,4 +111,4 @@ jobs:
               --title "v0.1.0-experimental (Definitiv-Nicht-Final-Und-Experimentell)" \
               --notes "Automated experimental release containing Windows binary and Unified Kernel Image (bifrost-boot.efi)."
           fi
-          gh release upload v0.1.0-experimental bifrost-boot.efi --clobber
+          gh release upload v0.1.0-experimental bifrost-boot.efi target/x86_64-unknown-linux-musl/release/bifroest-linux --clobber

@@ -40,14 +40,15 @@ impl Scanner {
             user_profile.join("Projects"),
             user_profile.join("source").join("repos"),
             user_profile.join("dev"),
+            user_profile.join("src"),
             user_profile.join("workspace"),
         ];
         #[cfg(target_os = "windows")]
         dev_roots.push(PathBuf::from("C:\\dev"));
         let git_repos = git::scan_git_repos(&dev_roots, 3);
 
-        // 4. Installierte Software via Winget & Registry
-        progress_cb("Lese Winget-Software-Datenbank aus...", 4, 4);
+        // 4. Installierte Software via Winget/Registry bzw. Native PM + Flatpak
+        progress_cb("Lese installierte Software-Datenbank aus...", 4, 4);
         let software = software::scan_installed_software(&user_profile);
 
         ScanResult {
@@ -60,7 +61,23 @@ impl Scanner {
     }
 }
 
-fn get_user_profile_dir() -> PathBuf {
+pub fn get_user_profile_dir() -> PathBuf {
+    if let Ok(explicit) = env::var("BIFROEST_SOURCE_HOME") {
+        let p = PathBuf::from(explicit);
+        if p.exists() {
+            return p;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(sudo_user) = env::var("SUDO_USER") {
+        let sudo_user = sudo_user.trim();
+        if !sudo_user.is_empty() && sudo_user != "root" {
+            let candidate = PathBuf::from("/home").join(sudo_user);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
     if let Ok(profile) = env::var("USERPROFILE") {
         return PathBuf::from(profile);
     }
@@ -124,12 +141,62 @@ fn scan_filesystem_candidates(user_profile: &Path) -> Vec<CandidateItem> {
         });
     }
 
-    // VS Code User Config (Windows AppData oder Linux ~/.config)
+    // XDG Dotfiles & Flatpak User Data (Linux-native)
+    let xdg_config = user_profile.join(".config");
+    let has_xdg_config = xdg_config.exists() && cfg!(target_os = "linux");
+    if has_xdg_config {
+        let (bytes, count) = calculate_dir_size(&xdg_config, 3);
+        list.push(CandidateItem {
+            id: "xdg_config".to_string(),
+            path: xdg_config,
+            display_name: "~/.config (XDG Dotfiles & App-Einstellungen)".to_string(),
+            description: "Desktop-, Terminal-, Editor- und Tool-Konfigurationen".to_string(),
+            total_bytes: bytes,
+            size_human: format_bytes(bytes),
+            category: CandidateCategory::ApplicationConfig,
+            selected: true,
+            item_count: count,
+        });
+    }
+
+    let flatpak_data = user_profile.join(".var").join("app");
+    if flatpak_data.exists() {
+        let (bytes, count) = calculate_dir_size(&flatpak_data, 3);
+        list.push(CandidateItem {
+            id: "flatpak_data".to_string(),
+            path: flatpak_data,
+            display_name: "~/.var/app (Flatpak Nutzerdaten)".to_string(),
+            description: "Gespeicherte App-Daten aller Flatpak-Programme".to_string(),
+            total_bytes: bytes,
+            size_human: format_bytes(bytes),
+            category: CandidateCategory::ApplicationConfig,
+            selected: true,
+            item_count: count,
+        });
+    }
+
+    let nm_wifi = PathBuf::from("/etc/NetworkManager/system-connections");
+    if cfg!(target_os = "linux") && nm_wifi.exists() {
+        let (bytes, count) = calculate_dir_size(&nm_wifi, 1);
+        list.push(CandidateItem {
+            id: "nm_wifi".to_string(),
+            path: nm_wifi,
+            display_name: "/etc/NetworkManager/system-connections".to_string(),
+            description: "WLAN-/VPN-Profile (0600 POSIX Credentials)".to_string(),
+            total_bytes: bytes,
+            size_human: if count > 0 { format_bytes(bytes) } else { "WLAN Profile (Root bei Exec)".to_string() },
+            category: CandidateCategory::Credentials,
+            selected: true,
+            item_count: count,
+        });
+    }
+
+    // VS Code User Config (Windows AppData oder non-Linux Fallback)
     let vscode_win = user_profile.join("AppData").join("Roaming").join("Code").join("User");
     let vscode_linux = user_profile.join(".config").join("Code").join("User");
     let vscode_target = if vscode_win.exists() {
         Some((vscode_win, "%APPDATA%\\Code\\User"))
-    } else if vscode_linux.exists() {
+    } else if !has_xdg_config && vscode_linux.exists() {
         Some((vscode_linux, "~/.config/Code/User"))
     } else {
         None
